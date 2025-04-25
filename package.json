@@ -1,0 +1,49 @@
+{
+  "name": "linkinator-action",
+  "version": "1.11.0",
+  "description": "A GitHub Action that checks your README and other markdown for 404s.",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "c8 mocha",
+    "fix": "semistandard --fix",
+    "lint": "semistandard",
+    "build": "ncc build src/index.js --license licenses.txt --source-map"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/step-security/linkinator-action.git"
+  },
+  "keywords": [
+    "404",
+    "link",
+    "checker"
+  ],
+  "author": "step-security",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/step-security/linkinator-action/issues"
+  },
+  "homepage": "https://github.com/step-security/linkinator-action#readme",
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "linkinator": "6.1.2"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.2",
+    "axios": "^1.8.4",
+    "c8": "^10.1.2",
+    "mocha": "^11.0.0",
+    "nock": "^14.0.0",
+    "semistandard": "^17.0.0",
+    "sinon": "^19.0.2"
+  },
+  "semistandard": {
+    "ignore": [
+      "dist/*.*"
+    ]
+  }
+}
