@@ -166,7 +166,7 @@ describe('linkinator action', () => {
     assert.strictEqual(setOutputStub.callCount, 1);
     assert.ok(setFailedStub.notCalled);
     assert.ok(errorStub.notCalled);
-    assert.strictEqual(infoStub.getCalls().length, 6);
+    assert.strictEqual(infoStub.getCalls().length, 11);
     const expected = '[SKP] http://fake.local/fake';
     assert.ok(infoStub.getCalls().find(x => x.args[0] === expected));
     scope.done();
