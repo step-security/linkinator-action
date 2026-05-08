@@ -1,0 +1,11 @@
+[[IgnoredVulns]]
+id = "GHSA-73rr-hh4g-fpgx"
+reason = "Used in tests. Transitive dev dep via mocha/sinon (diff@7.0.0); not present in dist/index.js or production dependencies."
+
+[[IgnoredVulns]]
+id = "GHSA-5c6j-r48x-rmvq"
+reason = "Used in tests. Transitive dev dep via mocha (serialize-javascript@6.0.2); not present in dist/index.js or production dependencies."
+
+[[IgnoredVulns]]
+id = "GHSA-qj8w-gfj5-8c6v"
+reason = "Used in tests. Transitive dev dep via mocha (serialize-javascript@6.0.2); not present in dist/index.js or production dependencies."
