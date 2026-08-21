@@ -1,10 +1,10 @@
-import core from '@actions/core';
-import { LinkChecker, LinkState, getConfig } from 'linkinator';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import * as core from '@actions/core';
 import axios from 'axios';
+import { getConfig, LinkChecker, LinkState } from 'linkinator';
 
-export async function getFullConfig () {
+export async function getFullConfig() {
   const defaults = {
     path: ['*.md'],
     concurrency: 100,
@@ -14,7 +14,16 @@ export async function getFullConfig () {
     markdown: true,
     directoryListing: true,
     retry: false,
-    verbosity: 'WARNING'
+    retryErrors: false,
+    retryErrorsCount: 3,
+    retryErrorsJitter: 2000,
+    verbosity: 'WARNING',
+    allowInsecureCerts: false,
+    requireHttps: 'off',
+    cleanUrls: false,
+    checkCss: false,
+    checkFragments: false,
+    redirects: 'allow',
   };
   // The options returned from `getInput` appear to always be strings.
   const actionsConfig = {
@@ -27,19 +36,28 @@ export async function getFullConfig () {
     serverRoot: parseString('serverRoot'),
     directoryListing: parseBoolean('directoryListing'),
     retry: parseBoolean('retry'),
+    retryErrors: parseBoolean('retryErrors'),
+    retryErrorsCount: parseNumber('retryErrorsCount'),
+    retryErrorsJitter: parseNumber('retryErrorsJitter'),
+    userAgent: parseString('userAgent'),
     verbosity: parseString('verbosity'),
-    config: parseString('config')
+    config: parseString('config'),
+    allowInsecureCerts: parseBoolean('allowInsecureCerts'),
+    requireHttps: parseRequireHttps('requireHttps'),
+    cleanUrls: parseBoolean('cleanUrls'),
+    checkCss: parseBoolean('checkCss'),
+    checkFragments: parseBoolean('checkFragments'),
+    statusCodes: parseJSON('statusCodes'),
+    redirects: parseString('redirects'),
   };
   const urlRewriteSearch = parseString('urlRewriteSearch');
   const urlRewriteReplace = parseString('urlRewriteReplace');
   actionsConfig.urlRewriteExpressions = [];
   if (urlRewriteSearch && urlRewriteReplace) {
-    actionsConfig.urlRewriteExpressions.push(
-      {
-        pattern: urlRewriteSearch,
-        replacement: urlRewriteReplace
-      }
-    );
+    actionsConfig.urlRewriteExpressions.push({
+      pattern: urlRewriteSearch,
+      replacement: urlRewriteReplace,
+    });
   }
   const fileConfig = await getConfig(actionsConfig);
   const config = Object.assign({}, defaults, fileConfig);
@@ -47,7 +65,187 @@ export async function getFullConfig () {
   return config;
 }
 
-async function validateSubscription () {
+/**
+ * Check if a link failure is due to a fragment/anchor validation error
+ * @param {object} link The link result object
+ * @returns {boolean} True if this is a fragment validation failure
+ */
+function isFragmentFailure(link) {
+  // Check for fragment/anchor validation errors in failure details
+  if (link.failureDetails && link.failureDetails.length > 0) {
+    for (const detail of link.failureDetails) {
+      if (detail instanceof Error) {
+        const message = detail.message || '';
+        if (message.includes('fragment') || message.includes('anchor')) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get the display status for a link (shows 'x' for fragment failures)
+ * @param {object} link The link result object
+ * @returns {string} The status to display
+ */
+function getDisplayStatus(link) {
+  if (isFragmentFailure(link)) {
+    return 'x';
+  }
+  return String(link.status || '');
+}
+
+/**
+ * Extract a user-friendly failure reason from a link result
+ * @param {object} link The link result object
+ * @returns {string} A human-readable failure reason
+ */
+export function getFailureReason(link) {
+  // If there are no failure details, return generic message
+  if (!link.failureDetails || link.failureDetails.length === 0) {
+    return link.status ? 'HTTP Error' : 'Request failed';
+  }
+
+  // Check for fragment/anchor validation errors
+  if (isFragmentFailure(link)) {
+    return 'Fragment not found';
+  }
+
+  // Prefer the most specific message in the error cause chain. Undici wraps
+  // network errors such as ENOTFOUND and ECONNREFUSED in `TypeError: fetch
+  // failed`, so reporting only the outer message hides the actionable detail.
+  for (const detail of link.failureDetails) {
+    const messages = [];
+    const seen = new Set();
+    let error = detail;
+
+    while (error && typeof error === 'object' && !seen.has(error)) {
+      seen.add(error);
+      if (typeof error.message === 'string' && error.message) {
+        messages.push(error.message);
+      }
+      error = error.cause;
+    }
+
+    if (messages.length > 0) {
+      return messages.at(-1);
+    }
+  }
+
+  // Default to HTTP error for other cases
+  return link.status ? `HTTP ${link.status}` : 'Request failed';
+}
+
+/**
+ * Serialize failure details, including non-enumerable Error properties.
+ * @param {unknown} failureDetails Linkinator failure details
+ * @returns {string} JSON suitable for DEBUG logging
+ */
+export function stringifyFailureDetails(failureDetails) {
+  const seen = new WeakSet();
+
+  return JSON.stringify(
+    failureDetails,
+    (_key, value) => {
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) {
+          return '[Circular]';
+        }
+        seen.add(value);
+
+        if (value instanceof Error) {
+          return {
+            name: value.name,
+            message: value.message,
+            stack: value.stack,
+            cause: value.cause,
+            ...value,
+          };
+        }
+      }
+      return value;
+    },
+    2,
+  );
+}
+
+export async function generateJobSummary(result, logger) {
+  const brokenLinks = result.links.filter((x) => x.state === 'BROKEN');
+  const okLinks = result.links.filter((x) => x.state === 'OK');
+  const skippedLinks = result.links.filter((x) => x.state === 'SKIPPED');
+  const totalLinks = result.links.length;
+
+  // Start building the summary
+  const summary = core.summary.addHeading('🔗 Linkinator Results', 2);
+
+  // Add status line
+  if (result.passed) {
+    summary.addRaw(
+      `\n**Status:** ✅ All links are valid!\n\n`,
+    );
+  } else {
+    summary.addRaw(
+      `\n**Status:** ❌ Found ${brokenLinks.length} broken ${brokenLinks.length === 1 ? 'link' : 'links'}\n\n`,
+    );
+  }
+
+  // Add statistics
+  summary.addHeading('📊 Summary', 3);
+  summary.addList([
+    `Total links scanned: ${totalLinks}`,
+    `✅ Passed: ${okLinks.length}`,
+    `❌ Broken: ${brokenLinks.length}`,
+    `⏭️ Skipped: ${skippedLinks.length}`,
+  ]);
+
+  // Add broken links table if any exist
+  if (brokenLinks.length > 0) {
+    summary.addHeading('❌ Broken Links', 3);
+
+    // Group broken links by parent
+    const parents = brokenLinks.reduce((acc, curr) => {
+      const parent = curr.parent || '(unknown)';
+      if (!acc[parent]) {
+        acc[parent] = [];
+      }
+      acc[parent].push(curr);
+      return acc;
+    }, {});
+
+    // Create table rows grouped by parent
+    const tableRows = [
+      [
+        { data: 'Status', header: true },
+        { data: 'URL', header: true },
+        { data: 'Reason', header: true },
+        { data: 'Source', header: true },
+      ],
+    ];
+
+    for (const parent of Object.keys(parents).sort()) {
+      for (const link of parents[parent]) {
+        const reason = getFailureReason(link);
+        const displayStatus = getDisplayStatus(link);
+        tableRows.push([
+          displayStatus,
+          link.url,
+          reason,
+          parent,
+        ]);
+      }
+    }
+
+    summary.addTable(tableRows);
+  }
+
+  // Write the summary
+  await summary.write();
+}
+
+async function validateSubscription() {
   let repoPrivate;
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (eventPath && fsSync.existsSync(eventPath)) {
@@ -61,10 +259,10 @@ async function validateSubscription () {
     'https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions';
 
   core.info('');
-  core.info('\u001b[1;36mStepSecurity Maintained Action\u001b[0m');
+  core.info('[1;36mStepSecurity Maintained Action[0m');
   core.info(`Secure drop-in replacement for ${upstream}`);
-  if (repoPrivate === false) { core.info('\u001b[32m\u2713 Free for public repositories\u001b[0m'); }
-  core.info(`\u001b[36mLearn more:\u001b[0m ${docsUrl}`);
+  if (repoPrivate === false) { core.info('[32m✓ Free for public repositories[0m'); }
+  core.info(`[36mLearn more:[0m ${docsUrl}`);
   core.info('');
 
   if (repoPrivate === false) return;
@@ -81,10 +279,10 @@ async function validateSubscription () {
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 403) {
       core.error(
-        '\u001b[1;31mThis action requires a StepSecurity subscription for private repositories.\u001b[0m'
+        '[1;31mThis action requires a StepSecurity subscription for private repositories.[0m'
       );
       core.error(
-        `\u001b[31mLearn how to enable a subscription: ${docsUrl}\u001b[0m`
+        `[31mLearn how to enable a subscription: ${docsUrl}[0m`
       );
       process.exit(1);
     }
@@ -92,13 +290,18 @@ async function validateSubscription () {
   }
 }
 
-export async function main () {
+export async function main() {
   try {
     await validateSubscription();
     const config = await getFullConfig();
     const verbosity = getVerbosity(config.verbosity);
     const logger = new Logger(verbosity);
-    const { GITHUB_HEAD_REF, GITHUB_BASE_REF, GITHUB_REPOSITORY, GITHUB_EVENT_PATH } = process.env;
+    const {
+      GITHUB_HEAD_REF,
+      GITHUB_BASE_REF,
+      GITHUB_REPOSITORY,
+      GITHUB_EVENT_PATH,
+    } = process.env;
     // Read pull_request payload and use it to determine head user/repo:
     if (GITHUB_EVENT_PATH) {
       try {
@@ -110,9 +313,18 @@ export async function main () {
           if (!config.urlRewriteExpressions) {
             config.urlRewriteExpressions = [];
           }
+          // Escape special regex characters in branch names
+          const escapeRegex = (str) =>
+            str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const escapedBaseRef = escapeRegex(GITHUB_BASE_REF);
+
+          // Match GitHub blob/tree URLs specifically to avoid greedy matching
+          // that could include parts of the branch name in the path capture
           config.urlRewriteExpressions.push({
-            pattern: new RegExp(`github.com/${GITHUB_REPOSITORY}(/.*/)(${GITHUB_BASE_REF})/(.*)`),
-            replacement: `github.com/${repo}$1${GITHUB_HEAD_REF}/$3`
+            pattern: new RegExp(
+              `github\\.com/${GITHUB_REPOSITORY}/(blob|tree)/(${escapedBaseRef})/(.*)`,
+            ),
+            replacement: `github.com/${repo}/$1/${GITHUB_HEAD_REF}/$3`,
           });
         }
       } catch (err) {
@@ -121,11 +333,14 @@ export async function main () {
     }
 
     const checker = new LinkChecker()
-      .on('link', link => {
+      .on('link', (link) => {
         switch (link.state) {
-          case LinkState.BROKEN:
-            logger.error(`[${link.status.toString()}] ${link.url}`);
+          case LinkState.BROKEN: {
+            const reason = getFailureReason(link);
+            const displayStatus = getDisplayStatus(link);
+            logger.error(`[${displayStatus}] ${link.url} - ${reason}`);
             break;
+          }
           case LinkState.OK:
             logger.warn(`[${link.status.toString()}] ${link.url}`);
             break;
@@ -134,15 +349,19 @@ export async function main () {
             break;
         }
       })
-      .on('retry', retryInfo => {
+      .on('retry', (retryInfo) => {
         logger.info('[RETRY]', retryInfo);
       });
     core.info(`Scanning ${config.path.join(', ')}`);
     const result = await checker.check(config);
-    const nonSkippedLinks = result.links.filter(x => x.state !== 'SKIPPED');
+    const nonSkippedLinks = result.links.filter((x) => x.state !== 'SKIPPED');
     core.info(`Scanned total of ${nonSkippedLinks.length} links!`);
+
+    // Generate job summary
+    await generateJobSummary(result, logger);
+
     if (!result.passed) {
-      const brokenLinks = result.links.filter(x => x.state === 'BROKEN');
+      const brokenLinks = result.links.filter((x) => x.state === 'BROKEN');
       let failureOutput = `Detected ${brokenLinks.length} broken links.`;
 
       // build a map of failed links by the parent document
@@ -158,8 +377,10 @@ export async function main () {
       for (const parent of Object.keys(parents)) {
         failureOutput += `\n ${parent}`;
         for (const link of parents[parent]) {
-          failureOutput += `\n   [${link.status}] ${link.url}`;
-          logger.debug(JSON.stringify(link.failureDetails, null, 2));
+          const reason = getFailureReason(link);
+          const displayStatus = getDisplayStatus(link);
+          failureOutput += `\n   [${displayStatus}] ${link.url} - ${reason}`;
+          logger.debug(stringifyFailureDetails(link.failureDetails));
         }
       }
       core.setFailed(failureOutput);
@@ -170,19 +391,22 @@ export async function main () {
   }
 }
 
-function parseString (input) {
+function parseString(input) {
   return core.getInput(input) || undefined;
 }
 
-function parseList (input) {
+function parseList(input) {
   const value = core.getInput(input) || undefined;
   if (value) {
-    return value.split(/[\s,]+/).map(x => x.trim()).filter(x => !!x);
+    return value
+      .split(/[\s,]+/)
+      .map((x) => x.trim())
+      .filter((x) => !!x);
   }
   return undefined;
 }
 
-function parseNumber (input) {
+function parseNumber(input) {
   const value = core.getInput(input) || undefined;
   if (value) {
     return Number(value);
@@ -190,7 +414,7 @@ function parseNumber (input) {
   return undefined;
 }
 
-function parseBoolean (input) {
+function parseBoolean(input) {
   const value = core.getInput(input) || undefined;
   if (value) {
     return value === 'true';
@@ -198,49 +422,85 @@ function parseBoolean (input) {
   return undefined;
 }
 
-function getVerbosity (verbosity) {
+function parseRequireHttps(input) {
+  const value = core.getInput(input).trim().toLowerCase();
+  switch (value) {
+    case '':
+      return undefined;
+    case 'true':
+    case 'error':
+      return 'error';
+    case 'false':
+    case 'off':
+      return 'off';
+    case 'warn':
+      return 'warn';
+    default:
+      throw new Error(
+        `Invalid requireHttps value "${value}". Expected true, false, off, warn, or error.`,
+      );
+  }
+}
+
+function parseJSON(input) {
+  const value = core.getInput(input) || undefined;
+  if (value) {
+    try {
+      return JSON.parse(value);
+    } catch (err) {
+      throw new Error(`Invalid JSON for ${input}: ${err.message}`);
+    }
+  }
+  return undefined;
+}
+
+function getVerbosity(verbosity) {
   verbosity = verbosity.toUpperCase();
   const options = Object.keys(LogLevel);
   if (!options.includes(verbosity)) {
     throw new Error(
-      `Invalid flag: VERBOSITY must be one of [${options.join(',')}]`
+      `Invalid flag: VERBOSITY must be one of [${options.join(',')}]`,
     );
   }
   return LogLevel[verbosity];
 }
+
+// This was lifted from linkinator. We use `core.` instead of `console.`
+// which made re-use more work than it was worth.
+// https://github.com/JustinBeckwith/linkinator/blob/main/src/logger.ts
 
 const LogLevel = {
   DEBUG: 0,
   INFO: 1,
   WARNING: 2,
   ERROR: 3,
-  NONE: 4
+  NONE: 4,
 };
 
 class Logger {
-  constructor (level) {
+  constructor(level) {
     this.level = level;
   }
 
-  debug (message) {
+  debug(message) {
     if (this.level <= LogLevel.DEBUG) {
       core.info(message);
     }
   }
 
-  info (message) {
+  info(message) {
     if (this.level <= LogLevel.INFO) {
       core.info(message);
     }
   }
 
-  warn (message) {
+  warn(message) {
     if (this.level <= LogLevel.WARNING) {
       core.info(message);
     }
   }
 
-  error (message) {
+  error(message) {
     if (this.level <= LogLevel.ERROR) {
       core.error(message);
     }
