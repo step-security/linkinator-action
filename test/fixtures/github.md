@@ -1,1 +1,1 @@
-[linky](https://github.com/JustinBeckwith/linkinator-action/blob/main/LICENSE)
+[linky](https://github.com/step-security/linkinator-action/blob/main/LICENSE)

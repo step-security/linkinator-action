@@ -384,7 +384,7 @@ describe('linkinator action', () => {
     stubSummary();
     vi.stubEnv('GITHUB_HEAD_REF', 'incoming');
     vi.stubEnv('GITHUB_BASE_REF', 'main');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload.json');
     const inputStub = createGetInputMock({
       paths: 'test/fixtures/github.md',
@@ -552,7 +552,7 @@ describe('linkinator action', () => {
     stubSummary();
     vi.stubEnv('GITHUB_HEAD_REF', 'release-please/branches/main');
     vi.stubEnv('GITHUB_BASE_REF', 'main');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload-slashes.json');
     const inputStub = createGetInputMock({
       paths: 'test/fixtures/github-slashed-branch.md',
@@ -562,7 +562,7 @@ describe('linkinator action', () => {
     const infoStub = vi.spyOn(core, 'info').mockImplementation(() => {});
 
     // The action should rewrite URLs from main branch to the slashed branch
-    // Original: https://github.com/JustinBeckwith/linkinator-action/blob/main/CONTRIBUTING.md
+    // Original: https://github.com/step-security/linkinator-action/blob/main/CONTRIBUTING.md
     // Expected: https://github.com/Codertocat/Hello-World/blob/release-please/branches/main/CONTRIBUTING.md
     const scope = mock('https://github.com')
       .head('/Codertocat/Hello-World/blob/release-please/branches/main/CONTRIBUTING.md')
@@ -582,7 +582,7 @@ describe('linkinator action', () => {
     stubSummary();
     vi.stubEnv('GITHUB_HEAD_REF', 'feature/deep/nested/branch');
     vi.stubEnv('GITHUB_BASE_REF', 'main');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload-slashes.json');
     const inputStub = createGetInputMock({
       paths: 'test/fixtures/github-slashed-branch.md',
@@ -609,7 +609,7 @@ describe('linkinator action', () => {
     stubSummary();
     vi.stubEnv('GITHUB_HEAD_REF', 'feature/test');
     vi.stubEnv('GITHUB_BASE_REF', 'main');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload-slashes.json');
     createGetInputMock({
       paths: 'test/fixtures/test.md',
@@ -637,12 +637,12 @@ describe('linkinator action', () => {
 
     // Create a fixture that has a URL with the branch name already in it
     const fs = await import('node:fs/promises');
-    const testContent = '[Link](https://github.com/JustinBeckwith/linkinator-action/blob/release-please/branches/main/FILE.md)';
+    const testContent = '[Link](https://github.com/step-security/linkinator-action/blob/release-please/branches/main/FILE.md)';
     await fs.writeFile('test/fixtures/github-already-on-branch.md', testContent);
 
     vi.stubEnv('GITHUB_HEAD_REF', 'release-please/branches/main');
     vi.stubEnv('GITHUB_BASE_REF', 'main');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload-slashes.json');
     const inputStub = createGetInputMock({
       paths: 'test/fixtures/github-already-on-branch.md',
@@ -657,7 +657,7 @@ describe('linkinator action', () => {
     // because the pattern is specifically /blob/{BASE_REF}/ not /blob/anything/with/main/at/end/
     // Since it doesn't match the base ref, it stays as-is and checks the original repo
     const scope = mock('https://github.com')
-      .head('/JustinBeckwith/linkinator-action/blob/release-please/branches/main/FILE.md')
+      .head('/step-security/linkinator-action/blob/release-please/branches/main/FILE.md')
       .reply(200);
 
     await main();
@@ -674,12 +674,12 @@ describe('linkinator action', () => {
     stubSummary();
     // Test that branch names with regex special chars are properly escaped
     const fs = await import('node:fs/promises');
-    const testContent = '[Link](https://github.com/JustinBeckwith/linkinator-action/blob/v1.0.0/FILE.md)';
+    const testContent = '[Link](https://github.com/step-security/linkinator-action/blob/v1.0.0/FILE.md)';
     await fs.writeFile('test/fixtures/github-special-chars.md', testContent);
 
     vi.stubEnv('GITHUB_HEAD_REF', 'feature/test');
     vi.stubEnv('GITHUB_BASE_REF', 'v1.0.0');
-    vi.stubEnv('GITHUB_REPOSITORY', 'JustinBeckwith/linkinator-action');
+    vi.stubEnv('GITHUB_REPOSITORY', 'step-security/linkinator-action');
     vi.stubEnv('GITHUB_EVENT_PATH', './test/fixtures/payload-slashes.json');
     const inputStub = createGetInputMock({
       paths: 'test/fixtures/github-special-chars.md',
