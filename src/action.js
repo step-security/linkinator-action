@@ -12,6 +12,7 @@ export async function getFullConfig () {
     skip: [],
     timeout: 0,
     markdown: true,
+    directoryListing: true,
     retry: false,
     verbosity: 'WARNING'
   };
