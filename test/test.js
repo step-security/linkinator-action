@@ -2,6 +2,14 @@ import assert from 'node:assert';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher } from 'undici';
 
+// Mock axios so validateSubscription never makes real network calls in tests
+vi.mock('axios', () => ({
+  default: {
+    post: vi.fn().mockRejectedValue(new Error('Network error')),
+    isAxiosError: vi.fn().mockReturnValue(false),
+  },
+}));
+
 // Mock @actions/core before importing anything else
 vi.mock('@actions/core', () => ({
   getInput: vi.fn(),
@@ -265,7 +273,6 @@ describe('linkinator action', () => {
     assert.strictEqual(setOutputStub.mock.calls.length, 1);
     assert.strictEqual(setFailedStub.mock.calls.length, 0);
     assert.strictEqual(errorStub.mock.calls.length, 0);
-    // 5 from the action scan + 6 from validateSubscription (banner + API timeout msg)
     assert.strictEqual(infoStub.mock.calls.length, 11);
     const expected = '[SKP] http://fake.local/fake';
     assert.ok(infoStub.mock.calls.find((call) => call[0] === expected));
