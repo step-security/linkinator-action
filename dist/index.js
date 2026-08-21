@@ -37255,6 +37255,7 @@ async function getFullConfig () {
     skip: [],
     timeout: 0,
     markdown: true,
+    directoryListing: true,
     retry: false,
     verbosity: 'WARNING'
   };
@@ -37435,7 +37436,7 @@ function parseNumber (input) {
 function parseBoolean (input) {
   const value = core.getInput(input) || undefined;
   if (value) {
-    return Boolean(value);
+    return value === 'true';
   }
   return undefined;
 }
