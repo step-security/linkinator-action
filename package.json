@@ -1,13 +1,13 @@
 {
   "name": "linkinator-action",
-  "version": "1.11.0",
+  "version": "2.4.5",
   "description": "A GitHub Action that checks your README and other markdown for 404s.",
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
   "scripts": {
-    "test": "c8 mocha",
-    "fix": "semistandard --fix",
-    "lint": "semistandard",
-    "build": "ncc build src/index.js --license licenses.txt --source-map"
+    "test": "vitest run",
+    "fix": "biome check --write .",
+    "lint": "biome check .",
+    "build": "esbuild src/index.js --bundle --platform=node --format=cjs --outfile=dist/index.cjs --sourcemap"
   },
   "type": "module",
   "engines": {
@@ -29,21 +29,14 @@
   },
   "homepage": "https://github.com/step-security/linkinator-action#readme",
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "linkinator": "6.1.2"
+    "@actions/core": "^3.0.0",
+    "linkinator": "^8.0.2"
   },
   "devDependencies": {
-    "@vercel/ncc": "^0.38.2",
+    "@biomejs/biome": "^2.3.13",
     "axios": "^1.8.4",
-    "c8": "^10.1.2",
-    "mocha": "^11.0.0",
-    "nock": "^14.0.0",
-    "semistandard": "^17.0.0",
-    "sinon": "^19.0.2"
-  },
-  "semistandard": {
-    "ignore": [
-      "dist/*.*"
-    ]
+    "esbuild": "^0.28.1",
+    "undici": "^8.8.0",
+    "vitest": "^4.0.18"
   }
 }
