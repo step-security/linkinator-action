@@ -9313,7 +9313,7 @@ var require_readable = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/api/readable.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { Readable: Readable4 } = require("node:stream");
+    var { Readable: Readable5 } = require("node:stream");
     var { RequestAbortedError, NotSupportedError, InvalidArgumentError, AbortError } = require_errors();
     var util4 = require_util();
     var { ReadableStreamFrom } = require_util();
@@ -9325,7 +9325,7 @@ var require_readable = __commonJS({
     var kContentLength = /* @__PURE__ */ Symbol("kContentLength");
     var noop2 = () => {
     };
-    var BodyReadable = class extends Readable4 {
+    var BodyReadable = class extends Readable5 {
       constructor({
         resume,
         abort,
@@ -9667,7 +9667,7 @@ var require_api_request = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/api/api-request.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { Readable: Readable4 } = require_readable();
+    var { Readable: Readable5 } = require_readable();
     var { InvalidArgumentError, RequestAbortedError } = require_errors();
     var util4 = require_util();
     var { getResolveErrorBodyCallback } = require_util3();
@@ -9762,7 +9762,7 @@ var require_api_request = __commonJS({
         const parsedHeaders = responseHeaders === "raw" ? util4.parseHeaders(rawHeaders) : headers;
         const contentType = parsedHeaders["content-type"];
         const contentLength = parsedHeaders["content-length"];
-        const res = new Readable4({
+        const res = new Readable5({
           resume,
           abort,
           contentType,
@@ -10077,7 +10077,7 @@ var require_api_pipeline = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/api/api-pipeline.js"(exports2, module2) {
     "use strict";
     var {
-      Readable: Readable4,
+      Readable: Readable5,
       Duplex,
       PassThrough
     } = require("node:stream");
@@ -10091,7 +10091,7 @@ var require_api_pipeline = __commonJS({
     var { addSignal, removeSignal } = require_abort_signal();
     var assert = require("node:assert");
     var kResume = /* @__PURE__ */ Symbol("resume");
-    var PipelineRequest = class extends Readable4 {
+    var PipelineRequest = class extends Readable5 {
       constructor() {
         super({ autoDestroy: true });
         this[kResume] = null;
@@ -10108,7 +10108,7 @@ var require_api_pipeline = __commonJS({
         callback(err);
       }
     };
-    var PipelineResponse = class extends Readable4 {
+    var PipelineResponse = class extends Readable5 {
       constructor(resume) {
         super({ autoDestroy: true });
         this[kResume] = resume;
@@ -13433,7 +13433,7 @@ var require_fetch = __commonJS({
       subresourceSet
     } = require_constants3();
     var EE = require("node:events");
-    var { Readable: Readable4, pipeline, finished } = require("node:stream");
+    var { Readable: Readable5, pipeline, finished } = require("node:stream");
     var { addAbortListener, isErrored, isReadable, bufferToLowerCasedHeaderName } = require_util();
     var { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require_data_url();
     var { getGlobalDispatcher } = require_global2();
@@ -14334,7 +14334,7 @@ var require_fetch = __commonJS({
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
               location = headersList.get("location", true);
-              this.body = new Readable4({ read: resume });
+              this.body = new Readable5({ read: resume });
               const decoders = [];
               const willFollow = location && request.redirect === "follow" && redirectStatusSet.has(status);
               if (request.method !== "HEAD" && request.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -14824,7 +14824,7 @@ var require_util4 = __commonJS({
     var { getEncoding } = require_encoding();
     var { serializeAMimeType, parseMIMEType } = require_data_url();
     var { types: types3 } = require("node:util");
-    var { StringDecoder: StringDecoder2 } = require("string_decoder");
+    var { StringDecoder: StringDecoder3 } = require("string_decoder");
     var { btoa: btoa2 } = require("node:buffer");
     var staticPropertyDescriptors = {
       enumerable: true,
@@ -14915,7 +14915,7 @@ var require_util4 = __commonJS({
             dataURL += serializeAMimeType(parsed);
           }
           dataURL += ";base64,";
-          const decoder = new StringDecoder2("latin1");
+          const decoder = new StringDecoder3("latin1");
           for (const chunk of bytes) {
             dataURL += btoa2(decoder.write(chunk));
           }
@@ -14944,7 +14944,7 @@ var require_util4 = __commonJS({
         }
         case "BinaryString": {
           let binaryString = "";
-          const decoder = new StringDecoder2("latin1");
+          const decoder = new StringDecoder3("latin1");
           for (const chunk of bytes) {
             binaryString += decoder.write(chunk);
           }
@@ -42819,7 +42819,7 @@ var require_readable2 = __commonJS({
     "use strict";
     var assert = require("node:assert");
     var { addAbortListener } = require("node:events");
-    var { Readable: Readable4 } = require("node:stream");
+    var { Readable: Readable5 } = require("node:stream");
     var { RequestAbortedError, NotSupportedError, InvalidArgumentError, AbortError } = require_errors2();
     var util4 = require_util9();
     var { ReadableStreamFrom } = require_util9();
@@ -42833,7 +42833,7 @@ var require_readable2 = __commonJS({
     var kBytesRead = /* @__PURE__ */ Symbol("kBytesRead");
     var noop2 = () => {
     };
-    var BodyReadable = class extends Readable4 {
+    var BodyReadable = class extends Readable5 {
       /**
        * @param {object} opts
        * @param {(this: Readable, size: number) => void} opts.resume
@@ -43232,7 +43232,7 @@ var require_api_request2 = __commonJS({
     "use strict";
     var assert = require("node:assert");
     var { AsyncResource } = require("node:async_hooks");
-    var { Readable: Readable4 } = require_readable2();
+    var { Readable: Readable5 } = require_readable2();
     var { InvalidArgumentError, RequestAbortedError } = require_errors2();
     var util4 = require_util9();
     function noop2() {
@@ -43318,7 +43318,7 @@ var require_api_request2 = __commonJS({
         const parsedHeaders = headers;
         const contentType = parsedHeaders?.["content-type"];
         const contentLength = parsedHeaders?.["content-length"];
-        const res = new Readable4({
+        const res = new Readable5({
           resume: () => controller.resume(),
           abort: (reason) => controller.abort(reason),
           contentType,
@@ -43694,7 +43694,7 @@ var require_api_pipeline2 = __commonJS({
   "node_modules/undici/lib/api/api-pipeline.js"(exports2, module2) {
     "use strict";
     var {
-      Readable: Readable4,
+      Readable: Readable5,
       Duplex,
       PassThrough
     } = require("node:stream");
@@ -43711,7 +43711,7 @@ var require_api_pipeline2 = __commonJS({
     function noop2() {
     }
     var kResume = /* @__PURE__ */ Symbol("resume");
-    var PipelineRequest = class extends Readable4 {
+    var PipelineRequest = class extends Readable5 {
       constructor() {
         super({ autoDestroy: true });
         this[kResume] = null;
@@ -43729,7 +43729,7 @@ var require_api_pipeline2 = __commonJS({
         callback(err);
       }
     };
-    var PipelineResponse = class extends Readable4 {
+    var PipelineResponse = class extends Readable5 {
       constructor(resume) {
         super({ autoDestroy: true });
         this[kResume] = resume;
@@ -49010,7 +49010,7 @@ var require_cache3 = __commonJS({
   "node_modules/undici/lib/interceptor/cache.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { Readable: Readable4 } = require("node:stream");
+    var { Readable: Readable5 } = require("node:stream");
     var util4 = require_util9();
     var CacheHandler = require_cache_handler();
     var MemoryCacheStore = require_memory_cache_store();
@@ -49186,7 +49186,7 @@ var require_cache3 = __commonJS({
       return dispatch(opts, new CacheHandler(globalOpts, cacheKey, handler));
     }
     function sendCachedValue(handler, opts, result, age, context, isStale2) {
-      const stream4 = util4.isStream(result.body) ? result.body : Readable4.from(result.body ?? []);
+      const stream4 = util4.isStream(result.body) ? result.body : Readable5.from(result.body ?? []);
       assert(!stream4.destroyed, "stream should not be destroyed");
       assert(!stream4.readableDidRead, "stream should not be readableDidRead");
       const controller = {
@@ -49430,12 +49430,12 @@ var require_cache3 = __commonJS({
 var require_decompress = __commonJS({
   "node_modules/undici/lib/interceptor/decompress.js"(exports2, module2) {
     "use strict";
-    var { createInflate, createGunzip, createBrotliDecompress, createZstdDecompress } = require("node:zlib");
+    var { createInflate, createGunzip: createGunzip2, createBrotliDecompress, createZstdDecompress } = require("node:zlib");
     var { pipeline } = require("node:stream");
     var DecoratorHandler = require_decorator_handler2();
     var supportedEncodings = {
-      gzip: createGunzip,
-      "x-gzip": createGunzip,
+      gzip: createGunzip2,
+      "x-gzip": createGunzip2,
       br: createBrotliDecompress,
       deflate: createInflate,
       compress: createInflate,
@@ -52335,7 +52335,7 @@ var require_fetch2 = __commonJS({
       subresourceSet
     } = require_constants8();
     var EE = require("node:events");
-    var { Readable: Readable4, pipeline, finished, isErrored, isReadable } = require("node:stream");
+    var { Readable: Readable5, pipeline, finished, isErrored, isReadable } = require("node:stream");
     var { addAbortListener, bufferToLowerCasedHeaderName } = require_util9();
     var { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require_data_url2();
     var { getGlobalDispatcher } = require_global4();
@@ -53311,7 +53311,7 @@ var require_fetch2 = __commonJS({
                 const headersList = new HeadersList();
                 appendHeadersListFromResponseHeaders(headersList, headers, rawHeaders);
                 const location = headersList.get("location", true);
-                this.body = new Readable4({ read: () => controller.resume() });
+                this.body = new Readable5({ read: () => controller.resume() });
                 const willFollow = location && request.redirect === "follow" && redirectStatusSet.has(status);
                 const decoders = [];
                 if (request.method !== "HEAD" && request.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -57717,6 +57717,1923 @@ var require_escape_html = __commonJS({
       }
       return lastIndex !== index ? html + str.substring(lastIndex, index) : html;
     }
+  }
+});
+
+// node_modules/xmlchars/xml/1.0/ed5.js
+var require_ed5 = __commonJS({
+  "node_modules/xmlchars/xml/1.0/ed5.js"(exports2) {
+    "use strict";
+    Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.CHAR = "	\n\r -\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}";
+    exports2.S = " 	\r\n";
+    exports2.NAME_START_CHAR = ":A-Z_a-z\xC0-\xD6\xD8-\xF6\xF8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}";
+    exports2.NAME_CHAR = "-" + exports2.NAME_START_CHAR + ".0-9\xB7\u0300-\u036F\u203F-\u2040";
+    exports2.CHAR_RE = new RegExp("^[" + exports2.CHAR + "]$", "u");
+    exports2.S_RE = new RegExp("^[" + exports2.S + "]+$", "u");
+    exports2.NAME_START_CHAR_RE = new RegExp("^[" + exports2.NAME_START_CHAR + "]$", "u");
+    exports2.NAME_CHAR_RE = new RegExp("^[" + exports2.NAME_CHAR + "]$", "u");
+    exports2.NAME_RE = new RegExp("^[" + exports2.NAME_START_CHAR + "][" + exports2.NAME_CHAR + "]*$", "u");
+    exports2.NMTOKEN_RE = new RegExp("^[" + exports2.NAME_CHAR + "]+$", "u");
+    var TAB = 9;
+    var NL = 10;
+    var CR = 13;
+    var SPACE = 32;
+    exports2.S_LIST = [SPACE, NL, CR, TAB];
+    function isChar(c) {
+      return c >= SPACE && c <= 55295 || c === NL || c === CR || c === TAB || c >= 57344 && c <= 65533 || c >= 65536 && c <= 1114111;
+    }
+    exports2.isChar = isChar;
+    function isS(c) {
+      return c === SPACE || c === NL || c === CR || c === TAB;
+    }
+    exports2.isS = isS;
+    function isNameStartChar(c) {
+      return c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 58 || c === 95 || c === 8204 || c === 8205 || c >= 192 && c <= 214 || c >= 216 && c <= 246 || c >= 248 && c <= 767 || c >= 880 && c <= 893 || c >= 895 && c <= 8191 || c >= 8304 && c <= 8591 || c >= 11264 && c <= 12271 || c >= 12289 && c <= 55295 || c >= 63744 && c <= 64975 || c >= 65008 && c <= 65533 || c >= 65536 && c <= 983039;
+    }
+    exports2.isNameStartChar = isNameStartChar;
+    function isNameChar(c) {
+      return isNameStartChar(c) || c >= 48 && c <= 57 || c === 45 || c === 46 || c === 183 || c >= 768 && c <= 879 || c >= 8255 && c <= 8256;
+    }
+    exports2.isNameChar = isNameChar;
+  }
+});
+
+// node_modules/xmlchars/xml/1.1/ed2.js
+var require_ed2 = __commonJS({
+  "node_modules/xmlchars/xml/1.1/ed2.js"(exports2) {
+    "use strict";
+    Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.CHAR = "-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}";
+    exports2.RESTRICTED_CHAR = "-\b\v\f-\x7F-\x84\x86-\x9F";
+    exports2.S = " 	\r\n";
+    exports2.NAME_START_CHAR = ":A-Z_a-z\xC0-\xD6\xD8-\xF6\xF8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}";
+    exports2.NAME_CHAR = "-" + exports2.NAME_START_CHAR + ".0-9\xB7\u0300-\u036F\u203F-\u2040";
+    exports2.CHAR_RE = new RegExp("^[" + exports2.CHAR + "]$", "u");
+    exports2.RESTRICTED_CHAR_RE = new RegExp("^[" + exports2.RESTRICTED_CHAR + "]$", "u");
+    exports2.S_RE = new RegExp("^[" + exports2.S + "]+$", "u");
+    exports2.NAME_START_CHAR_RE = new RegExp("^[" + exports2.NAME_START_CHAR + "]$", "u");
+    exports2.NAME_CHAR_RE = new RegExp("^[" + exports2.NAME_CHAR + "]$", "u");
+    exports2.NAME_RE = new RegExp("^[" + exports2.NAME_START_CHAR + "][" + exports2.NAME_CHAR + "]*$", "u");
+    exports2.NMTOKEN_RE = new RegExp("^[" + exports2.NAME_CHAR + "]+$", "u");
+    var TAB = 9;
+    var NL = 10;
+    var CR = 13;
+    var SPACE = 32;
+    exports2.S_LIST = [SPACE, NL, CR, TAB];
+    function isChar(c) {
+      return c >= 1 && c <= 55295 || c >= 57344 && c <= 65533 || c >= 65536 && c <= 1114111;
+    }
+    exports2.isChar = isChar;
+    function isRestrictedChar(c) {
+      return c >= 1 && c <= 8 || c === 11 || c === 12 || c >= 14 && c <= 31 || c >= 127 && c <= 132 || c >= 134 && c <= 159;
+    }
+    exports2.isRestrictedChar = isRestrictedChar;
+    function isCharAndNotRestricted(c) {
+      return c === 9 || c === 10 || c === 13 || c > 31 && c < 127 || c === 133 || c > 159 && c <= 55295 || c >= 57344 && c <= 65533 || c >= 65536 && c <= 1114111;
+    }
+    exports2.isCharAndNotRestricted = isCharAndNotRestricted;
+    function isS(c) {
+      return c === SPACE || c === NL || c === CR || c === TAB;
+    }
+    exports2.isS = isS;
+    function isNameStartChar(c) {
+      return c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 58 || c === 95 || c === 8204 || c === 8205 || c >= 192 && c <= 214 || c >= 216 && c <= 246 || c >= 248 && c <= 767 || c >= 880 && c <= 893 || c >= 895 && c <= 8191 || c >= 8304 && c <= 8591 || c >= 11264 && c <= 12271 || c >= 12289 && c <= 55295 || c >= 63744 && c <= 64975 || c >= 65008 && c <= 65533 || c >= 65536 && c <= 983039;
+    }
+    exports2.isNameStartChar = isNameStartChar;
+    function isNameChar(c) {
+      return isNameStartChar(c) || c >= 48 && c <= 57 || c === 45 || c === 46 || c === 183 || c >= 768 && c <= 879 || c >= 8255 && c <= 8256;
+    }
+    exports2.isNameChar = isNameChar;
+  }
+});
+
+// node_modules/xmlchars/xmlns/1.0/ed3.js
+var require_ed3 = __commonJS({
+  "node_modules/xmlchars/xmlns/1.0/ed3.js"(exports2) {
+    "use strict";
+    Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.NC_NAME_START_CHAR = "A-Z_a-z\xC0-\xD6\xD8-\xF6\xF8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}";
+    exports2.NC_NAME_CHAR = "-" + exports2.NC_NAME_START_CHAR + ".0-9\xB7\u0300-\u036F\u203F-\u2040";
+    exports2.NC_NAME_START_CHAR_RE = new RegExp("^[" + exports2.NC_NAME_START_CHAR + "]$", "u");
+    exports2.NC_NAME_CHAR_RE = new RegExp("^[" + exports2.NC_NAME_CHAR + "]$", "u");
+    exports2.NC_NAME_RE = new RegExp("^[" + exports2.NC_NAME_START_CHAR + "][" + exports2.NC_NAME_CHAR + "]*$", "u");
+    function isNCNameStartChar(c) {
+      return c >= 65 && c <= 90 || c === 95 || c >= 97 && c <= 122 || c >= 192 && c <= 214 || c >= 216 && c <= 246 || c >= 248 && c <= 767 || c >= 880 && c <= 893 || c >= 895 && c <= 8191 || c >= 8204 && c <= 8205 || c >= 8304 && c <= 8591 || c >= 11264 && c <= 12271 || c >= 12289 && c <= 55295 || c >= 63744 && c <= 64975 || c >= 65008 && c <= 65533 || c >= 65536 && c <= 983039;
+    }
+    exports2.isNCNameStartChar = isNCNameStartChar;
+    function isNCNameChar(c) {
+      return isNCNameStartChar(c) || (c === 45 || c === 46 || c >= 48 && c <= 57 || c === 183 || c >= 768 && c <= 879 || c >= 8255 && c <= 8256);
+    }
+    exports2.isNCNameChar = isNCNameChar;
+  }
+});
+
+// node_modules/saxes/saxes.js
+var require_saxes = __commonJS({
+  "node_modules/saxes/saxes.js"(exports2) {
+    "use strict";
+    Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.SaxesParser = exports2.EVENTS = void 0;
+    var ed5 = require_ed5();
+    var ed2 = require_ed2();
+    var NSed3 = require_ed3();
+    var isS = ed5.isS;
+    var isChar10 = ed5.isChar;
+    var isNameStartChar = ed5.isNameStartChar;
+    var isNameChar = ed5.isNameChar;
+    var S_LIST = ed5.S_LIST;
+    var NAME_RE = ed5.NAME_RE;
+    var isChar11 = ed2.isChar;
+    var isNCNameStartChar = NSed3.isNCNameStartChar;
+    var isNCNameChar = NSed3.isNCNameChar;
+    var NC_NAME_RE = NSed3.NC_NAME_RE;
+    var XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
+    var XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
+    var rootNS = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+      __proto__: null,
+      xml: XML_NAMESPACE,
+      xmlns: XMLNS_NAMESPACE
+    };
+    var XML_ENTITIES = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+      __proto__: null,
+      amp: "&",
+      gt: ">",
+      lt: "<",
+      quot: '"',
+      apos: "'"
+    };
+    var EOC = -1;
+    var NL_LIKE = -2;
+    var S_BEGIN = 0;
+    var S_BEGIN_WHITESPACE = 1;
+    var S_DOCTYPE = 2;
+    var S_DOCTYPE_QUOTE = 3;
+    var S_DTD = 4;
+    var S_DTD_QUOTED = 5;
+    var S_DTD_OPEN_WAKA = 6;
+    var S_DTD_OPEN_WAKA_BANG = 7;
+    var S_DTD_COMMENT = 8;
+    var S_DTD_COMMENT_ENDING = 9;
+    var S_DTD_COMMENT_ENDED = 10;
+    var S_DTD_PI = 11;
+    var S_DTD_PI_ENDING = 12;
+    var S_TEXT = 13;
+    var S_ENTITY = 14;
+    var S_OPEN_WAKA = 15;
+    var S_OPEN_WAKA_BANG = 16;
+    var S_COMMENT = 17;
+    var S_COMMENT_ENDING = 18;
+    var S_COMMENT_ENDED = 19;
+    var S_CDATA = 20;
+    var S_CDATA_ENDING = 21;
+    var S_CDATA_ENDING_2 = 22;
+    var S_PI_FIRST_CHAR = 23;
+    var S_PI_REST = 24;
+    var S_PI_BODY = 25;
+    var S_PI_ENDING = 26;
+    var S_XML_DECL_NAME_START = 27;
+    var S_XML_DECL_NAME = 28;
+    var S_XML_DECL_EQ = 29;
+    var S_XML_DECL_VALUE_START = 30;
+    var S_XML_DECL_VALUE = 31;
+    var S_XML_DECL_SEPARATOR = 32;
+    var S_XML_DECL_ENDING = 33;
+    var S_OPEN_TAG = 34;
+    var S_OPEN_TAG_SLASH = 35;
+    var S_ATTRIB = 36;
+    var S_ATTRIB_NAME = 37;
+    var S_ATTRIB_NAME_SAW_WHITE = 38;
+    var S_ATTRIB_VALUE = 39;
+    var S_ATTRIB_VALUE_QUOTED = 40;
+    var S_ATTRIB_VALUE_CLOSED = 41;
+    var S_ATTRIB_VALUE_UNQUOTED = 42;
+    var S_CLOSE_TAG = 43;
+    var S_CLOSE_TAG_SAW_WHITE = 44;
+    var TAB = 9;
+    var NL = 10;
+    var CR = 13;
+    var SPACE = 32;
+    var BANG = 33;
+    var DQUOTE = 34;
+    var AMP = 38;
+    var SQUOTE = 39;
+    var MINUS = 45;
+    var FORWARD_SLASH = 47;
+    var SEMICOLON = 59;
+    var LESS = 60;
+    var EQUAL = 61;
+    var GREATER = 62;
+    var QUESTION = 63;
+    var OPEN_BRACKET = 91;
+    var CLOSE_BRACKET = 93;
+    var NEL = 133;
+    var LS = 8232;
+    var isQuote = (c) => c === DQUOTE || c === SQUOTE;
+    var QUOTES = [DQUOTE, SQUOTE];
+    var DOCTYPE_TERMINATOR = [...QUOTES, OPEN_BRACKET, GREATER];
+    var DTD_TERMINATOR = [...QUOTES, LESS, CLOSE_BRACKET];
+    var XML_DECL_NAME_TERMINATOR = [EQUAL, QUESTION, ...S_LIST];
+    var ATTRIB_VALUE_UNQUOTED_TERMINATOR = [...S_LIST, GREATER, AMP, LESS];
+    function nsPairCheck(parser, prefix, uri) {
+      switch (prefix) {
+        case "xml":
+          if (uri !== XML_NAMESPACE) {
+            parser.fail(`xml prefix must be bound to ${XML_NAMESPACE}.`);
+          }
+          break;
+        case "xmlns":
+          if (uri !== XMLNS_NAMESPACE) {
+            parser.fail(`xmlns prefix must be bound to ${XMLNS_NAMESPACE}.`);
+          }
+          break;
+        default:
+      }
+      switch (uri) {
+        case XMLNS_NAMESPACE:
+          parser.fail(prefix === "" ? `the default namespace may not be set to ${uri}.` : `may not assign a prefix (even "xmlns") to the URI ${XMLNS_NAMESPACE}.`);
+          break;
+        case XML_NAMESPACE:
+          switch (prefix) {
+            case "xml":
+              break;
+            case "":
+              parser.fail(`the default namespace may not be set to ${uri}.`);
+              break;
+            default:
+              parser.fail("may not assign the xml namespace to another prefix.");
+          }
+          break;
+        default:
+      }
+    }
+    function nsMappingCheck(parser, mapping) {
+      for (const local of Object.keys(mapping)) {
+        nsPairCheck(parser, local, mapping[local]);
+      }
+    }
+    var isNCName = (name) => NC_NAME_RE.test(name);
+    var isName = (name) => NAME_RE.test(name);
+    var FORBIDDEN_START = 0;
+    var FORBIDDEN_BRACKET = 1;
+    var FORBIDDEN_BRACKET_BRACKET = 2;
+    exports2.EVENTS = [
+      "xmldecl",
+      "text",
+      "processinginstruction",
+      "doctype",
+      "comment",
+      "opentagstart",
+      "attribute",
+      "opentag",
+      "closetag",
+      "cdata",
+      "error",
+      "end",
+      "ready"
+    ];
+    var EVENT_NAME_TO_HANDLER_NAME = {
+      xmldecl: "xmldeclHandler",
+      text: "textHandler",
+      processinginstruction: "piHandler",
+      doctype: "doctypeHandler",
+      comment: "commentHandler",
+      opentagstart: "openTagStartHandler",
+      attribute: "attributeHandler",
+      opentag: "openTagHandler",
+      closetag: "closeTagHandler",
+      cdata: "cdataHandler",
+      error: "errorHandler",
+      end: "endHandler",
+      ready: "readyHandler"
+    };
+    var SaxesParser2 = class {
+      /**
+       * @param opt The parser options.
+       */
+      constructor(opt) {
+        this.opt = opt !== null && opt !== void 0 ? opt : {};
+        this.fragmentOpt = !!this.opt.fragment;
+        const xmlnsOpt = this.xmlnsOpt = !!this.opt.xmlns;
+        this.trackPosition = this.opt.position !== false;
+        this.fileName = this.opt.fileName;
+        if (xmlnsOpt) {
+          this.nameStartCheck = isNCNameStartChar;
+          this.nameCheck = isNCNameChar;
+          this.isName = isNCName;
+          this.processAttribs = this.processAttribsNS;
+          this.pushAttrib = this.pushAttribNS;
+          this.ns = Object.assign({ __proto__: null }, rootNS);
+          const additional = this.opt.additionalNamespaces;
+          if (additional != null) {
+            nsMappingCheck(this, additional);
+            Object.assign(this.ns, additional);
+          }
+        } else {
+          this.nameStartCheck = isNameStartChar;
+          this.nameCheck = isNameChar;
+          this.isName = isName;
+          this.processAttribs = this.processAttribsPlain;
+          this.pushAttrib = this.pushAttribPlain;
+        }
+        this.stateTable = [
+          /* eslint-disable @typescript-eslint/unbound-method */
+          this.sBegin,
+          this.sBeginWhitespace,
+          this.sDoctype,
+          this.sDoctypeQuote,
+          this.sDTD,
+          this.sDTDQuoted,
+          this.sDTDOpenWaka,
+          this.sDTDOpenWakaBang,
+          this.sDTDComment,
+          this.sDTDCommentEnding,
+          this.sDTDCommentEnded,
+          this.sDTDPI,
+          this.sDTDPIEnding,
+          this.sText,
+          this.sEntity,
+          this.sOpenWaka,
+          this.sOpenWakaBang,
+          this.sComment,
+          this.sCommentEnding,
+          this.sCommentEnded,
+          this.sCData,
+          this.sCDataEnding,
+          this.sCDataEnding2,
+          this.sPIFirstChar,
+          this.sPIRest,
+          this.sPIBody,
+          this.sPIEnding,
+          this.sXMLDeclNameStart,
+          this.sXMLDeclName,
+          this.sXMLDeclEq,
+          this.sXMLDeclValueStart,
+          this.sXMLDeclValue,
+          this.sXMLDeclSeparator,
+          this.sXMLDeclEnding,
+          this.sOpenTag,
+          this.sOpenTagSlash,
+          this.sAttrib,
+          this.sAttribName,
+          this.sAttribNameSawWhite,
+          this.sAttribValue,
+          this.sAttribValueQuoted,
+          this.sAttribValueClosed,
+          this.sAttribValueUnquoted,
+          this.sCloseTag,
+          this.sCloseTagSawWhite
+          /* eslint-enable @typescript-eslint/unbound-method */
+        ];
+        this._init();
+      }
+      /**
+       * Indicates whether or not the parser is closed. If ``true``, wait for
+       * the ``ready`` event to write again.
+       */
+      get closed() {
+        return this._closed;
+      }
+      _init() {
+        var _a;
+        this.openWakaBang = "";
+        this.text = "";
+        this.name = "";
+        this.piTarget = "";
+        this.entity = "";
+        this.q = null;
+        this.tags = [];
+        this.tag = null;
+        this.topNS = null;
+        this.chunk = "";
+        this.chunkPosition = 0;
+        this.i = 0;
+        this.prevI = 0;
+        this.carriedFromPrevious = void 0;
+        this.forbiddenState = FORBIDDEN_START;
+        this.attribList = [];
+        const { fragmentOpt } = this;
+        this.state = fragmentOpt ? S_TEXT : S_BEGIN;
+        this.reportedTextBeforeRoot = this.reportedTextAfterRoot = this.closedRoot = this.sawRoot = fragmentOpt;
+        this.xmlDeclPossible = !fragmentOpt;
+        this.xmlDeclExpects = ["version"];
+        this.entityReturnState = void 0;
+        let { defaultXMLVersion } = this.opt;
+        if (defaultXMLVersion === void 0) {
+          if (this.opt.forceXMLVersion === true) {
+            throw new Error("forceXMLVersion set but defaultXMLVersion is not set");
+          }
+          defaultXMLVersion = "1.0";
+        }
+        this.setXMLVersion(defaultXMLVersion);
+        this.positionAtNewLine = 0;
+        this.doctype = false;
+        this._closed = false;
+        this.xmlDecl = {
+          version: void 0,
+          encoding: void 0,
+          standalone: void 0
+        };
+        this.line = 1;
+        this.column = 0;
+        this.ENTITIES = Object.create(XML_ENTITIES);
+        (_a = this.readyHandler) === null || _a === void 0 ? void 0 : _a.call(this);
+      }
+      /**
+       * The stream position the parser is currently looking at. This field is
+       * zero-based.
+       *
+       * This field is not based on counting Unicode characters but is to be
+       * interpreted as a plain index into a JavaScript string.
+       */
+      get position() {
+        return this.chunkPosition + this.i;
+      }
+      /**
+       * The column number of the next character to be read by the parser.  *
+       * This field is zero-based. (The first column in a line is 0.)
+       *
+       * This field reports the index at which the next character would be in the
+       * line if the line were represented as a JavaScript string.  Note that this
+       * *can* be different to a count based on the number of *Unicode characters*
+       * due to how JavaScript handles astral plane characters.
+       *
+       * See [[column]] for a number that corresponds to a count of Unicode
+       * characters.
+       */
+      get columnIndex() {
+        return this.position - this.positionAtNewLine;
+      }
+      /**
+       * Set an event listener on an event. The parser supports one handler per
+       * event type. If you try to set an event handler over an existing handler,
+       * the old handler is silently overwritten.
+       *
+       * @param name The event to listen to.
+       *
+       * @param handler The handler to set.
+       */
+      on(name, handler) {
+        this[EVENT_NAME_TO_HANDLER_NAME[name]] = handler;
+      }
+      /**
+       * Unset an event handler.
+       *
+       * @parma name The event to stop listening to.
+       */
+      off(name) {
+        this[EVENT_NAME_TO_HANDLER_NAME[name]] = void 0;
+      }
+      /**
+       * Make an error object. The error object will have a message that contains
+       * the ``fileName`` option passed at the creation of the parser. If position
+       * tracking was turned on, it will also have line and column number
+       * information.
+       *
+       * @param message The message describing the error to report.
+       *
+       * @returns An error object with a properly formatted message.
+       */
+      makeError(message) {
+        var _a;
+        let msg = (_a = this.fileName) !== null && _a !== void 0 ? _a : "";
+        if (this.trackPosition) {
+          if (msg.length > 0) {
+            msg += ":";
+          }
+          msg += `${this.line}:${this.column}`;
+        }
+        if (msg.length > 0) {
+          msg += ": ";
+        }
+        return new Error(msg + message);
+      }
+      /**
+       * Report a parsing error. This method is made public so that client code may
+       * check for issues that are outside the scope of this project and can report
+       * errors.
+       *
+       * @param message The error to report.
+       *
+       * @returns this
+       */
+      fail(message) {
+        const err = this.makeError(message);
+        const handler = this.errorHandler;
+        if (handler === void 0) {
+          throw err;
+        } else {
+          handler(err);
+        }
+        return this;
+      }
+      /**
+       * Write a XML data to the parser.
+       *
+       * @param chunk The XML data to write.
+       *
+       * @returns this
+       */
+      // We do need object for the type here. Yes, it often causes problems
+      // but not in this case.
+      write(chunk) {
+        if (this.closed) {
+          return this.fail("cannot write after close; assign an onready handler.");
+        }
+        let end = false;
+        if (chunk === null) {
+          end = true;
+          chunk = "";
+        } else if (typeof chunk === "object") {
+          chunk = chunk.toString();
+        }
+        if (this.carriedFromPrevious !== void 0) {
+          chunk = `${this.carriedFromPrevious}${chunk}`;
+          this.carriedFromPrevious = void 0;
+        }
+        let limit = chunk.length;
+        const lastCode = chunk.charCodeAt(limit - 1);
+        if (!end && // A trailing CR or surrogate must be carried over to the next
+        // chunk.
+        (lastCode === CR || lastCode >= 55296 && lastCode <= 56319)) {
+          this.carriedFromPrevious = chunk[limit - 1];
+          limit--;
+          chunk = chunk.slice(0, limit);
+        }
+        const { stateTable } = this;
+        this.chunk = chunk;
+        this.i = 0;
+        while (this.i < limit) {
+          stateTable[this.state].call(this);
+        }
+        this.chunkPosition += limit;
+        return end ? this.end() : this;
+      }
+      /**
+       * Close the current stream. Perform final well-formedness checks and reset
+       * the parser tstate.
+       *
+       * @returns this
+       */
+      close() {
+        return this.write(null);
+      }
+      /**
+       * Get a single code point out of the current chunk. This updates the current
+       * position if we do position tracking.
+       *
+       * This is the algorithm to use for XML 1.0.
+       *
+       * @returns The character read.
+       */
+      getCode10() {
+        const { chunk, i } = this;
+        this.prevI = i;
+        this.i = i + 1;
+        if (i >= chunk.length) {
+          return EOC;
+        }
+        const code = chunk.charCodeAt(i);
+        this.column++;
+        if (code < 55296) {
+          if (code >= SPACE || code === TAB) {
+            return code;
+          }
+          switch (code) {
+            case NL:
+              this.line++;
+              this.column = 0;
+              this.positionAtNewLine = this.position;
+              return NL;
+            case CR:
+              if (chunk.charCodeAt(i + 1) === NL) {
+                this.i = i + 2;
+              }
+              this.line++;
+              this.column = 0;
+              this.positionAtNewLine = this.position;
+              return NL_LIKE;
+            default:
+              this.fail("disallowed character.");
+              return code;
+          }
+        }
+        if (code > 56319) {
+          if (!(code >= 57344 && code <= 65533)) {
+            this.fail("disallowed character.");
+          }
+          return code;
+        }
+        const final = 65536 + (code - 55296) * 1024 + (chunk.charCodeAt(i + 1) - 56320);
+        this.i = i + 2;
+        if (final > 1114111) {
+          this.fail("disallowed character.");
+        }
+        return final;
+      }
+      /**
+       * Get a single code point out of the current chunk. This updates the current
+       * position if we do position tracking.
+       *
+       * This is the algorithm to use for XML 1.1.
+       *
+       * @returns {number} The character read.
+       */
+      getCode11() {
+        const { chunk, i } = this;
+        this.prevI = i;
+        this.i = i + 1;
+        if (i >= chunk.length) {
+          return EOC;
+        }
+        const code = chunk.charCodeAt(i);
+        this.column++;
+        if (code < 55296) {
+          if (code > 31 && code < 127 || code > 159 && code !== LS || code === TAB) {
+            return code;
+          }
+          switch (code) {
+            case NL:
+              this.line++;
+              this.column = 0;
+              this.positionAtNewLine = this.position;
+              return NL;
+            case CR: {
+              const next = chunk.charCodeAt(i + 1);
+              if (next === NL || next === NEL) {
+                this.i = i + 2;
+              }
+            }
+            /* yes, fall through */
+            case NEL:
+            // 0x85
+            case LS:
+              this.line++;
+              this.column = 0;
+              this.positionAtNewLine = this.position;
+              return NL_LIKE;
+            default:
+              this.fail("disallowed character.");
+              return code;
+          }
+        }
+        if (code > 56319) {
+          if (!(code >= 57344 && code <= 65533)) {
+            this.fail("disallowed character.");
+          }
+          return code;
+        }
+        const final = 65536 + (code - 55296) * 1024 + (chunk.charCodeAt(i + 1) - 56320);
+        this.i = i + 2;
+        if (final > 1114111) {
+          this.fail("disallowed character.");
+        }
+        return final;
+      }
+      /**
+       * Like ``getCode`` but with the return value normalized so that ``NL`` is
+       * returned for ``NL_LIKE``.
+       */
+      getCodeNorm() {
+        const c = this.getCode();
+        return c === NL_LIKE ? NL : c;
+      }
+      unget() {
+        this.i = this.prevI;
+        this.column--;
+      }
+      /**
+       * Capture characters into a buffer until encountering one of a set of
+       * characters.
+       *
+       * @param chars An array of codepoints. Encountering a character in the array
+       * ends the capture. (``chars`` may safely contain ``NL``.)
+       *
+       * @return The character code that made the capture end, or ``EOC`` if we hit
+       * the end of the chunk. The return value cannot be NL_LIKE: NL is returned
+       * instead.
+       */
+      captureTo(chars) {
+        let { i: start } = this;
+        const { chunk } = this;
+        while (true) {
+          const c = this.getCode();
+          const isNLLike = c === NL_LIKE;
+          const final = isNLLike ? NL : c;
+          if (final === EOC || chars.includes(final)) {
+            this.text += chunk.slice(start, this.prevI);
+            return final;
+          }
+          if (isNLLike) {
+            this.text += `${chunk.slice(start, this.prevI)}
+`;
+            start = this.i;
+          }
+        }
+      }
+      /**
+       * Capture characters into a buffer until encountering a character.
+       *
+       * @param char The codepoint that ends the capture. **NOTE ``char`` MAY NOT
+       * CONTAIN ``NL``.** Passing ``NL`` will result in buggy behavior.
+       *
+       * @return ``true`` if we ran into the character. Otherwise, we ran into the
+       * end of the current chunk.
+       */
+      captureToChar(char) {
+        let { i: start } = this;
+        const { chunk } = this;
+        while (true) {
+          let c = this.getCode();
+          switch (c) {
+            case NL_LIKE:
+              this.text += `${chunk.slice(start, this.prevI)}
+`;
+              start = this.i;
+              c = NL;
+              break;
+            case EOC:
+              this.text += chunk.slice(start);
+              return false;
+            default:
+          }
+          if (c === char) {
+            this.text += chunk.slice(start, this.prevI);
+            return true;
+          }
+        }
+      }
+      /**
+       * Capture characters that satisfy ``isNameChar`` into the ``name`` field of
+       * this parser.
+       *
+       * @return The character code that made the test fail, or ``EOC`` if we hit
+       * the end of the chunk. The return value cannot be NL_LIKE: NL is returned
+       * instead.
+       */
+      captureNameChars() {
+        const { chunk, i: start } = this;
+        while (true) {
+          const c = this.getCode();
+          if (c === EOC) {
+            this.name += chunk.slice(start);
+            return EOC;
+          }
+          if (!isNameChar(c)) {
+            this.name += chunk.slice(start, this.prevI);
+            return c === NL_LIKE ? NL : c;
+          }
+        }
+      }
+      /**
+       * Skip white spaces.
+       *
+       * @return The character that ended the skip, or ``EOC`` if we hit
+       * the end of the chunk. The return value cannot be NL_LIKE: NL is returned
+       * instead.
+       */
+      skipSpaces() {
+        while (true) {
+          const c = this.getCodeNorm();
+          if (c === EOC || !isS(c)) {
+            return c;
+          }
+        }
+      }
+      setXMLVersion(version) {
+        this.currentXMLVersion = version;
+        if (version === "1.0") {
+          this.isChar = isChar10;
+          this.getCode = this.getCode10;
+        } else {
+          this.isChar = isChar11;
+          this.getCode = this.getCode11;
+        }
+      }
+      // STATE ENGINE METHODS
+      // This needs to be a state separate from S_BEGIN_WHITESPACE because we want
+      // to be sure never to come back to this state later.
+      sBegin() {
+        if (this.chunk.charCodeAt(0) === 65279) {
+          this.i++;
+          this.column++;
+        }
+        this.state = S_BEGIN_WHITESPACE;
+      }
+      sBeginWhitespace() {
+        const iBefore = this.i;
+        const c = this.skipSpaces();
+        if (this.prevI !== iBefore) {
+          this.xmlDeclPossible = false;
+        }
+        switch (c) {
+          case LESS:
+            this.state = S_OPEN_WAKA;
+            if (this.text.length !== 0) {
+              throw new Error("no-empty text at start");
+            }
+            break;
+          case EOC:
+            break;
+          default:
+            this.unget();
+            this.state = S_TEXT;
+            this.xmlDeclPossible = false;
+        }
+      }
+      sDoctype() {
+        var _a;
+        const c = this.captureTo(DOCTYPE_TERMINATOR);
+        switch (c) {
+          case GREATER: {
+            (_a = this.doctypeHandler) === null || _a === void 0 ? void 0 : _a.call(this, this.text);
+            this.text = "";
+            this.state = S_TEXT;
+            this.doctype = true;
+            break;
+          }
+          case EOC:
+            break;
+          default:
+            this.text += String.fromCodePoint(c);
+            if (c === OPEN_BRACKET) {
+              this.state = S_DTD;
+            } else if (isQuote(c)) {
+              this.state = S_DOCTYPE_QUOTE;
+              this.q = c;
+            }
+        }
+      }
+      sDoctypeQuote() {
+        const q3 = this.q;
+        if (this.captureToChar(q3)) {
+          this.text += String.fromCodePoint(q3);
+          this.q = null;
+          this.state = S_DOCTYPE;
+        }
+      }
+      sDTD() {
+        const c = this.captureTo(DTD_TERMINATOR);
+        if (c === EOC) {
+          return;
+        }
+        this.text += String.fromCodePoint(c);
+        if (c === CLOSE_BRACKET) {
+          this.state = S_DOCTYPE;
+        } else if (c === LESS) {
+          this.state = S_DTD_OPEN_WAKA;
+        } else if (isQuote(c)) {
+          this.state = S_DTD_QUOTED;
+          this.q = c;
+        }
+      }
+      sDTDQuoted() {
+        const q3 = this.q;
+        if (this.captureToChar(q3)) {
+          this.text += String.fromCodePoint(q3);
+          this.state = S_DTD;
+          this.q = null;
+        }
+      }
+      sDTDOpenWaka() {
+        const c = this.getCodeNorm();
+        this.text += String.fromCodePoint(c);
+        switch (c) {
+          case BANG:
+            this.state = S_DTD_OPEN_WAKA_BANG;
+            this.openWakaBang = "";
+            break;
+          case QUESTION:
+            this.state = S_DTD_PI;
+            break;
+          default:
+            this.state = S_DTD;
+        }
+      }
+      sDTDOpenWakaBang() {
+        const char = String.fromCodePoint(this.getCodeNorm());
+        const owb = this.openWakaBang += char;
+        this.text += char;
+        if (owb !== "-") {
+          this.state = owb === "--" ? S_DTD_COMMENT : S_DTD;
+          this.openWakaBang = "";
+        }
+      }
+      sDTDComment() {
+        if (this.captureToChar(MINUS)) {
+          this.text += "-";
+          this.state = S_DTD_COMMENT_ENDING;
+        }
+      }
+      sDTDCommentEnding() {
+        const c = this.getCodeNorm();
+        this.text += String.fromCodePoint(c);
+        this.state = c === MINUS ? S_DTD_COMMENT_ENDED : S_DTD_COMMENT;
+      }
+      sDTDCommentEnded() {
+        const c = this.getCodeNorm();
+        this.text += String.fromCodePoint(c);
+        if (c === GREATER) {
+          this.state = S_DTD;
+        } else {
+          this.fail("malformed comment.");
+          this.state = S_DTD_COMMENT;
+        }
+      }
+      sDTDPI() {
+        if (this.captureToChar(QUESTION)) {
+          this.text += "?";
+          this.state = S_DTD_PI_ENDING;
+        }
+      }
+      sDTDPIEnding() {
+        const c = this.getCodeNorm();
+        this.text += String.fromCodePoint(c);
+        if (c === GREATER) {
+          this.state = S_DTD;
+        }
+      }
+      sText() {
+        if (this.tags.length !== 0) {
+          this.handleTextInRoot();
+        } else {
+          this.handleTextOutsideRoot();
+        }
+      }
+      sEntity() {
+        let { i: start } = this;
+        const { chunk } = this;
+        loop:
+          while (true) {
+            switch (this.getCode()) {
+              case NL_LIKE:
+                this.entity += `${chunk.slice(start, this.prevI)}
+`;
+                start = this.i;
+                break;
+              case SEMICOLON: {
+                const { entityReturnState } = this;
+                const entity = this.entity + chunk.slice(start, this.prevI);
+                this.state = entityReturnState;
+                let parsed;
+                if (entity === "") {
+                  this.fail("empty entity name.");
+                  parsed = "&;";
+                } else {
+                  parsed = this.parseEntity(entity);
+                  this.entity = "";
+                }
+                if (entityReturnState !== S_TEXT || this.textHandler !== void 0) {
+                  this.text += parsed;
+                }
+                break loop;
+              }
+              case EOC:
+                this.entity += chunk.slice(start);
+                break loop;
+              default:
+            }
+          }
+      }
+      sOpenWaka() {
+        const c = this.getCode();
+        if (isNameStartChar(c)) {
+          this.state = S_OPEN_TAG;
+          this.unget();
+          this.xmlDeclPossible = false;
+        } else {
+          switch (c) {
+            case FORWARD_SLASH:
+              this.state = S_CLOSE_TAG;
+              this.xmlDeclPossible = false;
+              break;
+            case BANG:
+              this.state = S_OPEN_WAKA_BANG;
+              this.openWakaBang = "";
+              this.xmlDeclPossible = false;
+              break;
+            case QUESTION:
+              this.state = S_PI_FIRST_CHAR;
+              break;
+            default:
+              this.fail("disallowed character in tag name");
+              this.state = S_TEXT;
+              this.xmlDeclPossible = false;
+          }
+        }
+      }
+      sOpenWakaBang() {
+        this.openWakaBang += String.fromCodePoint(this.getCodeNorm());
+        switch (this.openWakaBang) {
+          case "[CDATA[":
+            if (!this.sawRoot && !this.reportedTextBeforeRoot) {
+              this.fail("text data outside of root node.");
+              this.reportedTextBeforeRoot = true;
+            }
+            if (this.closedRoot && !this.reportedTextAfterRoot) {
+              this.fail("text data outside of root node.");
+              this.reportedTextAfterRoot = true;
+            }
+            this.state = S_CDATA;
+            this.openWakaBang = "";
+            break;
+          case "--":
+            this.state = S_COMMENT;
+            this.openWakaBang = "";
+            break;
+          case "DOCTYPE":
+            this.state = S_DOCTYPE;
+            if (this.doctype || this.sawRoot) {
+              this.fail("inappropriately located doctype declaration.");
+            }
+            this.openWakaBang = "";
+            break;
+          default:
+            if (this.openWakaBang.length >= 7) {
+              this.fail("incorrect syntax.");
+            }
+        }
+      }
+      sComment() {
+        if (this.captureToChar(MINUS)) {
+          this.state = S_COMMENT_ENDING;
+        }
+      }
+      sCommentEnding() {
+        var _a;
+        const c = this.getCodeNorm();
+        if (c === MINUS) {
+          this.state = S_COMMENT_ENDED;
+          (_a = this.commentHandler) === null || _a === void 0 ? void 0 : _a.call(this, this.text);
+          this.text = "";
+        } else {
+          this.text += `-${String.fromCodePoint(c)}`;
+          this.state = S_COMMENT;
+        }
+      }
+      sCommentEnded() {
+        const c = this.getCodeNorm();
+        if (c !== GREATER) {
+          this.fail("malformed comment.");
+          this.text += `--${String.fromCodePoint(c)}`;
+          this.state = S_COMMENT;
+        } else {
+          this.state = S_TEXT;
+        }
+      }
+      sCData() {
+        if (this.captureToChar(CLOSE_BRACKET)) {
+          this.state = S_CDATA_ENDING;
+        }
+      }
+      sCDataEnding() {
+        const c = this.getCodeNorm();
+        if (c === CLOSE_BRACKET) {
+          this.state = S_CDATA_ENDING_2;
+        } else {
+          this.text += `]${String.fromCodePoint(c)}`;
+          this.state = S_CDATA;
+        }
+      }
+      sCDataEnding2() {
+        var _a;
+        const c = this.getCodeNorm();
+        switch (c) {
+          case GREATER: {
+            (_a = this.cdataHandler) === null || _a === void 0 ? void 0 : _a.call(this, this.text);
+            this.text = "";
+            this.state = S_TEXT;
+            break;
+          }
+          case CLOSE_BRACKET:
+            this.text += "]";
+            break;
+          default:
+            this.text += `]]${String.fromCodePoint(c)}`;
+            this.state = S_CDATA;
+        }
+      }
+      // We need this separate state to check the first character fo the pi target
+      // with this.nameStartCheck which allows less characters than this.nameCheck.
+      sPIFirstChar() {
+        const c = this.getCodeNorm();
+        if (this.nameStartCheck(c)) {
+          this.piTarget += String.fromCodePoint(c);
+          this.state = S_PI_REST;
+        } else if (c === QUESTION || isS(c)) {
+          this.fail("processing instruction without a target.");
+          this.state = c === QUESTION ? S_PI_ENDING : S_PI_BODY;
+        } else {
+          this.fail("disallowed character in processing instruction name.");
+          this.piTarget += String.fromCodePoint(c);
+          this.state = S_PI_REST;
+        }
+      }
+      sPIRest() {
+        const { chunk, i: start } = this;
+        while (true) {
+          const c = this.getCodeNorm();
+          if (c === EOC) {
+            this.piTarget += chunk.slice(start);
+            return;
+          }
+          if (!this.nameCheck(c)) {
+            this.piTarget += chunk.slice(start, this.prevI);
+            const isQuestion = c === QUESTION;
+            if (isQuestion || isS(c)) {
+              if (this.piTarget === "xml") {
+                if (!this.xmlDeclPossible) {
+                  this.fail("an XML declaration must be at the start of the document.");
+                }
+                this.state = isQuestion ? S_XML_DECL_ENDING : S_XML_DECL_NAME_START;
+              } else {
+                this.state = isQuestion ? S_PI_ENDING : S_PI_BODY;
+              }
+            } else {
+              this.fail("disallowed character in processing instruction name.");
+              this.piTarget += String.fromCodePoint(c);
+            }
+            break;
+          }
+        }
+      }
+      sPIBody() {
+        if (this.text.length === 0) {
+          const c = this.getCodeNorm();
+          if (c === QUESTION) {
+            this.state = S_PI_ENDING;
+          } else if (!isS(c)) {
+            this.text = String.fromCodePoint(c);
+          }
+        } else if (this.captureToChar(QUESTION)) {
+          this.state = S_PI_ENDING;
+        }
+      }
+      sPIEnding() {
+        var _a;
+        const c = this.getCodeNorm();
+        if (c === GREATER) {
+          const { piTarget } = this;
+          if (piTarget.toLowerCase() === "xml") {
+            this.fail("the XML declaration must appear at the start of the document.");
+          }
+          (_a = this.piHandler) === null || _a === void 0 ? void 0 : _a.call(this, {
+            target: piTarget,
+            body: this.text
+          });
+          this.piTarget = this.text = "";
+          this.state = S_TEXT;
+        } else if (c === QUESTION) {
+          this.text += "?";
+        } else {
+          this.text += `?${String.fromCodePoint(c)}`;
+          this.state = S_PI_BODY;
+        }
+        this.xmlDeclPossible = false;
+      }
+      sXMLDeclNameStart() {
+        const c = this.skipSpaces();
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          return;
+        }
+        if (c !== EOC) {
+          this.state = S_XML_DECL_NAME;
+          this.name = String.fromCodePoint(c);
+        }
+      }
+      sXMLDeclName() {
+        const c = this.captureTo(XML_DECL_NAME_TERMINATOR);
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          this.name += this.text;
+          this.text = "";
+          this.fail("XML declaration is incomplete.");
+          return;
+        }
+        if (!(isS(c) || c === EQUAL)) {
+          return;
+        }
+        this.name += this.text;
+        this.text = "";
+        if (!this.xmlDeclExpects.includes(this.name)) {
+          switch (this.name.length) {
+            case 0:
+              this.fail("did not expect any more name/value pairs.");
+              break;
+            case 1:
+              this.fail(`expected the name ${this.xmlDeclExpects[0]}.`);
+              break;
+            default:
+              this.fail(`expected one of ${this.xmlDeclExpects.join(", ")}`);
+          }
+        }
+        this.state = c === EQUAL ? S_XML_DECL_VALUE_START : S_XML_DECL_EQ;
+      }
+      sXMLDeclEq() {
+        const c = this.getCodeNorm();
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          this.fail("XML declaration is incomplete.");
+          return;
+        }
+        if (isS(c)) {
+          return;
+        }
+        if (c !== EQUAL) {
+          this.fail("value required.");
+        }
+        this.state = S_XML_DECL_VALUE_START;
+      }
+      sXMLDeclValueStart() {
+        const c = this.getCodeNorm();
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          this.fail("XML declaration is incomplete.");
+          return;
+        }
+        if (isS(c)) {
+          return;
+        }
+        if (!isQuote(c)) {
+          this.fail("value must be quoted.");
+          this.q = SPACE;
+        } else {
+          this.q = c;
+        }
+        this.state = S_XML_DECL_VALUE;
+      }
+      sXMLDeclValue() {
+        const c = this.captureTo([this.q, QUESTION]);
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          this.text = "";
+          this.fail("XML declaration is incomplete.");
+          return;
+        }
+        if (c === EOC) {
+          return;
+        }
+        const value = this.text;
+        this.text = "";
+        switch (this.name) {
+          case "version": {
+            this.xmlDeclExpects = ["encoding", "standalone"];
+            const version = value;
+            this.xmlDecl.version = version;
+            if (!/^1\.[0-9]+$/.test(version)) {
+              this.fail("version number must match /^1\\.[0-9]+$/.");
+            } else if (!this.opt.forceXMLVersion) {
+              this.setXMLVersion(version);
+            }
+            break;
+          }
+          case "encoding":
+            if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) {
+              this.fail("encoding value must match /^[A-Za-z0-9][A-Za-z0-9._-]*$/.");
+            }
+            this.xmlDeclExpects = ["standalone"];
+            this.xmlDecl.encoding = value;
+            break;
+          case "standalone":
+            if (value !== "yes" && value !== "no") {
+              this.fail('standalone value must match "yes" or "no".');
+            }
+            this.xmlDeclExpects = [];
+            this.xmlDecl.standalone = value;
+            break;
+          default:
+        }
+        this.name = "";
+        this.state = S_XML_DECL_SEPARATOR;
+      }
+      sXMLDeclSeparator() {
+        const c = this.getCodeNorm();
+        if (c === QUESTION) {
+          this.state = S_XML_DECL_ENDING;
+          return;
+        }
+        if (!isS(c)) {
+          this.fail("whitespace required.");
+          this.unget();
+        }
+        this.state = S_XML_DECL_NAME_START;
+      }
+      sXMLDeclEnding() {
+        var _a;
+        const c = this.getCodeNorm();
+        if (c === GREATER) {
+          if (this.piTarget !== "xml") {
+            this.fail("processing instructions are not allowed before root.");
+          } else if (this.name !== "version" && this.xmlDeclExpects.includes("version")) {
+            this.fail("XML declaration must contain a version.");
+          }
+          (_a = this.xmldeclHandler) === null || _a === void 0 ? void 0 : _a.call(this, this.xmlDecl);
+          this.name = "";
+          this.piTarget = this.text = "";
+          this.state = S_TEXT;
+        } else {
+          this.fail("The character ? is disallowed anywhere in XML declarations.");
+        }
+        this.xmlDeclPossible = false;
+      }
+      sOpenTag() {
+        var _a;
+        const c = this.captureNameChars();
+        if (c === EOC) {
+          return;
+        }
+        const tag = this.tag = {
+          name: this.name,
+          attributes: /* @__PURE__ */ Object.create(null)
+        };
+        this.name = "";
+        if (this.xmlnsOpt) {
+          this.topNS = tag.ns = /* @__PURE__ */ Object.create(null);
+        }
+        (_a = this.openTagStartHandler) === null || _a === void 0 ? void 0 : _a.call(this, tag);
+        this.sawRoot = true;
+        if (!this.fragmentOpt && this.closedRoot) {
+          this.fail("documents may contain only one root.");
+        }
+        switch (c) {
+          case GREATER:
+            this.openTag();
+            break;
+          case FORWARD_SLASH:
+            this.state = S_OPEN_TAG_SLASH;
+            break;
+          default:
+            if (!isS(c)) {
+              this.fail("disallowed character in tag name.");
+            }
+            this.state = S_ATTRIB;
+        }
+      }
+      sOpenTagSlash() {
+        if (this.getCode() === GREATER) {
+          this.openSelfClosingTag();
+        } else {
+          this.fail("forward-slash in opening tag not followed by >.");
+          this.state = S_ATTRIB;
+        }
+      }
+      sAttrib() {
+        const c = this.skipSpaces();
+        if (c === EOC) {
+          return;
+        }
+        if (isNameStartChar(c)) {
+          this.unget();
+          this.state = S_ATTRIB_NAME;
+        } else if (c === GREATER) {
+          this.openTag();
+        } else if (c === FORWARD_SLASH) {
+          this.state = S_OPEN_TAG_SLASH;
+        } else {
+          this.fail("disallowed character in attribute name.");
+        }
+      }
+      sAttribName() {
+        const c = this.captureNameChars();
+        if (c === EQUAL) {
+          this.state = S_ATTRIB_VALUE;
+        } else if (isS(c)) {
+          this.state = S_ATTRIB_NAME_SAW_WHITE;
+        } else if (c === GREATER) {
+          this.fail("attribute without value.");
+          this.pushAttrib(this.name, this.name);
+          this.name = this.text = "";
+          this.openTag();
+        } else if (c !== EOC) {
+          this.fail("disallowed character in attribute name.");
+        }
+      }
+      sAttribNameSawWhite() {
+        const c = this.skipSpaces();
+        switch (c) {
+          case EOC:
+            return;
+          case EQUAL:
+            this.state = S_ATTRIB_VALUE;
+            break;
+          default:
+            this.fail("attribute without value.");
+            this.text = "";
+            this.name = "";
+            if (c === GREATER) {
+              this.openTag();
+            } else if (isNameStartChar(c)) {
+              this.unget();
+              this.state = S_ATTRIB_NAME;
+            } else {
+              this.fail("disallowed character in attribute name.");
+              this.state = S_ATTRIB;
+            }
+        }
+      }
+      sAttribValue() {
+        const c = this.getCodeNorm();
+        if (isQuote(c)) {
+          this.q = c;
+          this.state = S_ATTRIB_VALUE_QUOTED;
+        } else if (!isS(c)) {
+          this.fail("unquoted attribute value.");
+          this.state = S_ATTRIB_VALUE_UNQUOTED;
+          this.unget();
+        }
+      }
+      sAttribValueQuoted() {
+        const { q: q3, chunk } = this;
+        let { i: start } = this;
+        while (true) {
+          switch (this.getCode()) {
+            case q3:
+              this.pushAttrib(this.name, this.text + chunk.slice(start, this.prevI));
+              this.name = this.text = "";
+              this.q = null;
+              this.state = S_ATTRIB_VALUE_CLOSED;
+              return;
+            case AMP:
+              this.text += chunk.slice(start, this.prevI);
+              this.state = S_ENTITY;
+              this.entityReturnState = S_ATTRIB_VALUE_QUOTED;
+              return;
+            case NL:
+            case NL_LIKE:
+            case TAB:
+              this.text += `${chunk.slice(start, this.prevI)} `;
+              start = this.i;
+              break;
+            case LESS:
+              this.text += chunk.slice(start, this.prevI);
+              this.fail("disallowed character.");
+              return;
+            case EOC:
+              this.text += chunk.slice(start);
+              return;
+            default:
+          }
+        }
+      }
+      sAttribValueClosed() {
+        const c = this.getCodeNorm();
+        if (isS(c)) {
+          this.state = S_ATTRIB;
+        } else if (c === GREATER) {
+          this.openTag();
+        } else if (c === FORWARD_SLASH) {
+          this.state = S_OPEN_TAG_SLASH;
+        } else if (isNameStartChar(c)) {
+          this.fail("no whitespace between attributes.");
+          this.unget();
+          this.state = S_ATTRIB_NAME;
+        } else {
+          this.fail("disallowed character in attribute name.");
+        }
+      }
+      sAttribValueUnquoted() {
+        const c = this.captureTo(ATTRIB_VALUE_UNQUOTED_TERMINATOR);
+        switch (c) {
+          case AMP:
+            this.state = S_ENTITY;
+            this.entityReturnState = S_ATTRIB_VALUE_UNQUOTED;
+            break;
+          case LESS:
+            this.fail("disallowed character.");
+            break;
+          case EOC:
+            break;
+          default:
+            if (this.text.includes("]]>")) {
+              this.fail('the string "]]>" is disallowed in char data.');
+            }
+            this.pushAttrib(this.name, this.text);
+            this.name = this.text = "";
+            if (c === GREATER) {
+              this.openTag();
+            } else {
+              this.state = S_ATTRIB;
+            }
+        }
+      }
+      sCloseTag() {
+        const c = this.captureNameChars();
+        if (c === GREATER) {
+          this.closeTag();
+        } else if (isS(c)) {
+          this.state = S_CLOSE_TAG_SAW_WHITE;
+        } else if (c !== EOC) {
+          this.fail("disallowed character in closing tag.");
+        }
+      }
+      sCloseTagSawWhite() {
+        switch (this.skipSpaces()) {
+          case GREATER:
+            this.closeTag();
+            break;
+          case EOC:
+            break;
+          default:
+            this.fail("disallowed character in closing tag.");
+        }
+      }
+      // END OF STATE ENGINE METHODS
+      handleTextInRoot() {
+        let { i: start, forbiddenState } = this;
+        const { chunk, textHandler: handler } = this;
+        scanLoop:
+          while (true) {
+            switch (this.getCode()) {
+              case LESS: {
+                this.state = S_OPEN_WAKA;
+                if (handler !== void 0) {
+                  const { text } = this;
+                  const slice = chunk.slice(start, this.prevI);
+                  if (text.length !== 0) {
+                    handler(text + slice);
+                    this.text = "";
+                  } else if (slice.length !== 0) {
+                    handler(slice);
+                  }
+                }
+                forbiddenState = FORBIDDEN_START;
+                break scanLoop;
+              }
+              case AMP:
+                this.state = S_ENTITY;
+                this.entityReturnState = S_TEXT;
+                if (handler !== void 0) {
+                  this.text += chunk.slice(start, this.prevI);
+                }
+                forbiddenState = FORBIDDEN_START;
+                break scanLoop;
+              case CLOSE_BRACKET:
+                switch (forbiddenState) {
+                  case FORBIDDEN_START:
+                    forbiddenState = FORBIDDEN_BRACKET;
+                    break;
+                  case FORBIDDEN_BRACKET:
+                    forbiddenState = FORBIDDEN_BRACKET_BRACKET;
+                    break;
+                  case FORBIDDEN_BRACKET_BRACKET:
+                    break;
+                  default:
+                    throw new Error("impossible state");
+                }
+                break;
+              case GREATER:
+                if (forbiddenState === FORBIDDEN_BRACKET_BRACKET) {
+                  this.fail('the string "]]>" is disallowed in char data.');
+                }
+                forbiddenState = FORBIDDEN_START;
+                break;
+              case NL_LIKE:
+                if (handler !== void 0) {
+                  this.text += `${chunk.slice(start, this.prevI)}
+`;
+                }
+                start = this.i;
+                forbiddenState = FORBIDDEN_START;
+                break;
+              case EOC:
+                if (handler !== void 0) {
+                  this.text += chunk.slice(start);
+                }
+                break scanLoop;
+              default:
+                forbiddenState = FORBIDDEN_START;
+            }
+          }
+        this.forbiddenState = forbiddenState;
+      }
+      handleTextOutsideRoot() {
+        let { i: start } = this;
+        const { chunk, textHandler: handler } = this;
+        let nonSpace = false;
+        outRootLoop:
+          while (true) {
+            const code = this.getCode();
+            switch (code) {
+              case LESS: {
+                this.state = S_OPEN_WAKA;
+                if (handler !== void 0) {
+                  const { text } = this;
+                  const slice = chunk.slice(start, this.prevI);
+                  if (text.length !== 0) {
+                    handler(text + slice);
+                    this.text = "";
+                  } else if (slice.length !== 0) {
+                    handler(slice);
+                  }
+                }
+                break outRootLoop;
+              }
+              case AMP:
+                this.state = S_ENTITY;
+                this.entityReturnState = S_TEXT;
+                if (handler !== void 0) {
+                  this.text += chunk.slice(start, this.prevI);
+                }
+                nonSpace = true;
+                break outRootLoop;
+              case NL_LIKE:
+                if (handler !== void 0) {
+                  this.text += `${chunk.slice(start, this.prevI)}
+`;
+                }
+                start = this.i;
+                break;
+              case EOC:
+                if (handler !== void 0) {
+                  this.text += chunk.slice(start);
+                }
+                break outRootLoop;
+              default:
+                if (!isS(code)) {
+                  nonSpace = true;
+                }
+            }
+          }
+        if (!nonSpace) {
+          return;
+        }
+        if (!this.sawRoot && !this.reportedTextBeforeRoot) {
+          this.fail("text data outside of root node.");
+          this.reportedTextBeforeRoot = true;
+        }
+        if (this.closedRoot && !this.reportedTextAfterRoot) {
+          this.fail("text data outside of root node.");
+          this.reportedTextAfterRoot = true;
+        }
+      }
+      pushAttribNS(name, value) {
+        var _a;
+        const { prefix, local } = this.qname(name);
+        const attr = { name, prefix, local, value };
+        this.attribList.push(attr);
+        (_a = this.attributeHandler) === null || _a === void 0 ? void 0 : _a.call(this, attr);
+        if (prefix === "xmlns") {
+          const trimmed = value.trim();
+          if (this.currentXMLVersion === "1.0" && trimmed === "") {
+            this.fail("invalid attempt to undefine prefix in XML 1.0");
+          }
+          this.topNS[local] = trimmed;
+          nsPairCheck(this, local, trimmed);
+        } else if (name === "xmlns") {
+          const trimmed = value.trim();
+          this.topNS[""] = trimmed;
+          nsPairCheck(this, "", trimmed);
+        }
+      }
+      pushAttribPlain(name, value) {
+        var _a;
+        const attr = { name, value };
+        this.attribList.push(attr);
+        (_a = this.attributeHandler) === null || _a === void 0 ? void 0 : _a.call(this, attr);
+      }
+      /**
+       * End parsing. This performs final well-formedness checks and resets the
+       * parser to a clean state.
+       *
+       * @returns this
+       */
+      end() {
+        var _a, _b;
+        if (!this.sawRoot) {
+          this.fail("document must contain a root element.");
+        }
+        const { tags } = this;
+        while (tags.length > 0) {
+          const tag = tags.pop();
+          this.fail(`unclosed tag: ${tag.name}`);
+        }
+        if (this.state !== S_BEGIN && this.state !== S_TEXT) {
+          this.fail("unexpected end.");
+        }
+        const { text } = this;
+        if (text.length !== 0) {
+          (_a = this.textHandler) === null || _a === void 0 ? void 0 : _a.call(this, text);
+          this.text = "";
+        }
+        this._closed = true;
+        (_b = this.endHandler) === null || _b === void 0 ? void 0 : _b.call(this);
+        this._init();
+        return this;
+      }
+      /**
+       * Resolve a namespace prefix.
+       *
+       * @param prefix The prefix to resolve.
+       *
+       * @returns The namespace URI or ``undefined`` if the prefix is not defined.
+       */
+      resolve(prefix) {
+        var _a, _b;
+        let uri = this.topNS[prefix];
+        if (uri !== void 0) {
+          return uri;
+        }
+        const { tags } = this;
+        for (let index = tags.length - 1; index >= 0; index--) {
+          uri = tags[index].ns[prefix];
+          if (uri !== void 0) {
+            return uri;
+          }
+        }
+        uri = this.ns[prefix];
+        if (uri !== void 0) {
+          return uri;
+        }
+        return (_b = (_a = this.opt).resolvePrefix) === null || _b === void 0 ? void 0 : _b.call(_a, prefix);
+      }
+      /**
+       * Parse a qname into its prefix and local name parts.
+       *
+       * @param name The name to parse
+       *
+       * @returns
+       */
+      qname(name) {
+        const colon = name.indexOf(":");
+        if (colon === -1) {
+          return { prefix: "", local: name };
+        }
+        const local = name.slice(colon + 1);
+        const prefix = name.slice(0, colon);
+        if (prefix === "" || local === "" || local.includes(":")) {
+          this.fail(`malformed name: ${name}.`);
+        }
+        return { prefix, local };
+      }
+      processAttribsNS() {
+        var _a;
+        const { attribList } = this;
+        const tag = this.tag;
+        {
+          const { prefix, local } = this.qname(tag.name);
+          tag.prefix = prefix;
+          tag.local = local;
+          const uri = tag.uri = (_a = this.resolve(prefix)) !== null && _a !== void 0 ? _a : "";
+          if (prefix !== "") {
+            if (prefix === "xmlns") {
+              this.fail('tags may not have "xmlns" as prefix.');
+            }
+            if (uri === "") {
+              this.fail(`unbound namespace prefix: ${JSON.stringify(prefix)}.`);
+              tag.uri = prefix;
+            }
+          }
+        }
+        if (attribList.length === 0) {
+          return;
+        }
+        const { attributes } = tag;
+        const seen = /* @__PURE__ */ new Set();
+        for (const attr of attribList) {
+          const { name, prefix, local } = attr;
+          let uri;
+          let eqname;
+          if (prefix === "") {
+            uri = name === "xmlns" ? XMLNS_NAMESPACE : "";
+            eqname = name;
+          } else {
+            uri = this.resolve(prefix);
+            if (uri === void 0) {
+              this.fail(`unbound namespace prefix: ${JSON.stringify(prefix)}.`);
+              uri = prefix;
+            }
+            eqname = `{${uri}}${local}`;
+          }
+          if (seen.has(eqname)) {
+            this.fail(`duplicate attribute: ${eqname}.`);
+          }
+          seen.add(eqname);
+          attr.uri = uri;
+          attributes[name] = attr;
+        }
+        this.attribList = [];
+      }
+      processAttribsPlain() {
+        const { attribList } = this;
+        const attributes = this.tag.attributes;
+        for (const { name, value } of attribList) {
+          if (attributes[name] !== void 0) {
+            this.fail(`duplicate attribute: ${name}.`);
+          }
+          attributes[name] = value;
+        }
+        this.attribList = [];
+      }
+      /**
+       * Handle a complete open tag. This parser code calls this once it has seen
+       * the whole tag. This method checks for well-formeness and then emits
+       * ``onopentag``.
+       */
+      openTag() {
+        var _a;
+        this.processAttribs();
+        const { tags } = this;
+        const tag = this.tag;
+        tag.isSelfClosing = false;
+        (_a = this.openTagHandler) === null || _a === void 0 ? void 0 : _a.call(this, tag);
+        tags.push(tag);
+        this.state = S_TEXT;
+        this.name = "";
+      }
+      /**
+       * Handle a complete self-closing tag. This parser code calls this once it has
+       * seen the whole tag. This method checks for well-formeness and then emits
+       * ``onopentag`` and ``onclosetag``.
+       */
+      openSelfClosingTag() {
+        var _a, _b, _c;
+        this.processAttribs();
+        const { tags } = this;
+        const tag = this.tag;
+        tag.isSelfClosing = true;
+        (_a = this.openTagHandler) === null || _a === void 0 ? void 0 : _a.call(this, tag);
+        (_b = this.closeTagHandler) === null || _b === void 0 ? void 0 : _b.call(this, tag);
+        const top = this.tag = (_c = tags[tags.length - 1]) !== null && _c !== void 0 ? _c : null;
+        if (top === null) {
+          this.closedRoot = true;
+        }
+        this.state = S_TEXT;
+        this.name = "";
+      }
+      /**
+       * Handle a complete close tag. This parser code calls this once it has seen
+       * the whole tag. This method checks for well-formeness and then emits
+       * ``onclosetag``.
+       */
+      closeTag() {
+        const { tags, name } = this;
+        this.state = S_TEXT;
+        this.name = "";
+        if (name === "") {
+          this.fail("weird empty close tag.");
+          this.text += "</>";
+          return;
+        }
+        const handler = this.closeTagHandler;
+        let l3 = tags.length;
+        while (l3-- > 0) {
+          const tag = this.tag = tags.pop();
+          this.topNS = tag.ns;
+          handler === null || handler === void 0 ? void 0 : handler(tag);
+          if (tag.name === name) {
+            break;
+          }
+          this.fail("unexpected close tag.");
+        }
+        if (l3 === 0) {
+          this.closedRoot = true;
+        } else if (l3 < 0) {
+          this.fail(`unmatched closing tag: ${name}.`);
+          this.text += `</${name}>`;
+        }
+      }
+      /**
+       * Resolves an entity. Makes any necessary well-formedness checks.
+       *
+       * @param entity The entity to resolve.
+       *
+       * @returns The parsed entity.
+       */
+      parseEntity(entity) {
+        if (entity[0] !== "#") {
+          const defined = this.ENTITIES[entity];
+          if (defined !== void 0) {
+            return defined;
+          }
+          this.fail(this.isName(entity) ? "undefined entity." : "disallowed character in entity name.");
+          return `&${entity};`;
+        }
+        let num = NaN;
+        if (entity[1] === "x" && /^#x[0-9a-f]+$/i.test(entity)) {
+          num = parseInt(entity.slice(2), 16);
+        } else if (/^#[0-9]+$/.test(entity)) {
+          num = parseInt(entity.slice(1), 10);
+        }
+        if (!this.isChar(num)) {
+          this.fail("malformed character entity.");
+          return `&${entity};`;
+        }
+        return String.fromCodePoint(num);
+      }
+    };
+    exports2.SaxesParser = SaxesParser2;
+  }
+});
+
+// node_modules/linkinator/build/src/saxes-parser.cjs
+var require_saxes_parser = __commonJS({
+  "node_modules/linkinator/build/src/saxes-parser.cjs"(exports2) {
+    "use strict";
+    var saxes = require_saxes();
+    exports2.SaxesParser = saxes.SaxesParser;
   }
 });
 
@@ -63441,9 +65358,7 @@ var {
 var import_node_events3 = require("node:events");
 var path4 = __toESM(require("node:path"), 1);
 var import_node_process4 = __toESM(require("node:process"), 1);
-
-// node_modules/linkinator/build/src/links.js
-var import_node_stream2 = require("node:stream");
+var import_node_stream5 = require("node:stream");
 
 // node_modules/htmlparser2/dist/WritableStream.js
 var import_node_stream = require("node:stream");
@@ -65638,6 +67553,7 @@ var linksAttribute = {
   ],
   srcset: ["img", "source"]
 };
+var ignoredLinkRelationships = /* @__PURE__ */ new Set(["dns-prefetch", "preconnect"]);
 var tagAttribute = {};
 for (const attribute of Object.keys(linksAttribute)) {
   for (const tag of linksAttribute[attribute]) {
@@ -65648,7 +67564,13 @@ for (const attribute of Object.keys(linksAttribute)) {
 function parseMetaRefresh(content) {
   const match = content.match(/^\s*\d+\s*;\s*url\s*=\s*(.+)/i);
   if (match?.[1]) {
-    return match[1].trim();
+    const url2 = match[1].trim();
+    const quote = url2[0];
+    if (quote === "'" || quote === '"') {
+      const closingQuote = url2.indexOf(quote, 1);
+      return url2.slice(1, closingQuote === -1 ? void 0 : closingQuote);
+    }
+    return url2;
   }
   return null;
 }
@@ -65660,8 +67582,10 @@ async function getLinks(source, baseUrl, checkCss = false) {
   let styleTagContent = "";
   let isJsonLd = false;
   let jsonLdContent = "";
+  const activeAnchors = [];
   const parser = new WritableStream2({
     onopentag(tag, attributes) {
+      const activeAnchor = tag === "a" ? { text: "" } : void 0;
       if (tag === "base" && !baseSet) {
         realBaseUrl = getBaseUrl(attributes.href, baseUrl);
         baseSet = true;
@@ -65674,8 +67598,8 @@ async function getLinks(source, baseUrl, checkCss = false) {
         isJsonLd = true;
         jsonLdContent = "";
       }
-      const relValuesToIgnore = ["dns-prefetch", "preconnect"];
-      if (tag === "link" && relValuesToIgnore.includes(attributes.rel)) {
+      const relTokens = attributes.rel?.match(/[^\t\n\f\r ]+/g) ?? [];
+      if (tag === "link" && relTokens.length > 0 && relTokens.every((rel) => ignoredLinkRelationships.has(rel.toLowerCase()))) {
         return;
       }
       if (tag === "meta" && attributes.content) {
@@ -65703,13 +67627,23 @@ async function getLinks(source, baseUrl, checkCss = false) {
           const linkString = attributes[attribute];
           if (linkString) {
             for (const link of parseAttribute(attribute, linkString)) {
-              links.push(parseLink(link, realBaseUrl));
+              const parsedLink = parseLink(link, realBaseUrl);
+              links.push(parsedLink);
+              if (activeAnchor && attribute === "href") {
+                activeAnchor.link = parsedLink;
+              }
             }
           }
         }
       }
+      if (activeAnchor) {
+        activeAnchors.push(activeAnchor);
+      }
     },
     ontext(text) {
+      for (const activeAnchor of activeAnchors) {
+        activeAnchor.text += text;
+      }
       if (isInStyleTag) {
         styleTagContent += text;
       }
@@ -65718,6 +67652,12 @@ async function getLinks(source, baseUrl, checkCss = false) {
       }
     },
     onclosetag(tag) {
+      if (tag === "a") {
+        const activeAnchor = activeAnchors.pop();
+        if (activeAnchor?.link) {
+          activeAnchor.link.displayText = activeAnchor.text.replace(/\s+/g, " ").trim();
+        }
+      }
       if (tag === "style" && isInStyleTag) {
         isInStyleTag = false;
         const urls = extractUrlsFromCss(styleTagContent);
@@ -65871,17 +67811,8 @@ async function extractFragmentIds(source) {
   });
   return fragments;
 }
-async function validateFragments(htmlContent, fragmentsToValidate) {
-  const fragmentStream = import_node_stream2.Readable.from([htmlContent]);
-  const validFragments = await extractFragmentIds(fragmentStream);
-  const results = [];
-  for (const fragment of fragmentsToValidate) {
-    results.push({
-      fragment,
-      isValid: validFragments.has(fragment)
-    });
-  }
-  return results;
+function isValidFragment(fragment, validFragments) {
+  return /^[tT][oO][pP]$/.test(fragment) || validFragments.has(fragment);
 }
 
 // node_modules/linkinator/build/src/options.js
@@ -65897,7 +67828,7 @@ var import_fs2 = require("fs");
 var xi = __toESM(require("node:fs"), 1);
 var import_promises = require("node:fs/promises");
 var import_node_events = require("node:events");
-var import_node_stream3 = __toESM(require("node:stream"), 1);
+var import_node_stream2 = __toESM(require("node:stream"), 1);
 var import_node_string_decoder2 = require("node:string_decoder");
 var Gt = (n7, t, e) => {
   let s = n7 instanceof RegExp ? ce(n7, e) : n7, i = t instanceof RegExp ? ce(t, e) : t, r = s !== null && i != null && ss(s, i, e);
@@ -67206,8 +69137,8 @@ var ft = class Me {
   }
 };
 var Ne = typeof process == "object" && process ? process : { stdout: null, stderr: null };
-var oi = (n7) => !!n7 && typeof n7 == "object" && (n7 instanceof V || n7 instanceof import_node_stream3.default || hi(n7) || ai(n7));
-var hi = (n7) => !!n7 && typeof n7 == "object" && n7 instanceof import_node_events.EventEmitter && typeof n7.pipe == "function" && n7.pipe !== import_node_stream3.default.Writable.prototype.pipe;
+var oi = (n7) => !!n7 && typeof n7 == "object" && (n7 instanceof V || n7 instanceof import_node_stream2.default || hi(n7) || ai(n7));
+var hi = (n7) => !!n7 && typeof n7 == "object" && n7 instanceof import_node_events.EventEmitter && typeof n7.pipe == "function" && n7.pipe !== import_node_stream2.default.Writable.prototype.pipe;
 var ai = (n7) => !!n7 && typeof n7 == "object" && n7 instanceof import_node_events.EventEmitter && typeof n7.write == "function" && typeof n7.end == "function";
 var G2 = /* @__PURE__ */ Symbol("EOF");
 var H = /* @__PURE__ */ Symbol("maybeEmitEnd");
@@ -68874,6 +70805,26 @@ var Ze = Object.assign(Je, { glob: Je, globSync: ts, sync: Ui, globStream: Qe, s
 Ze.glob = Ze;
 
 // node_modules/linkinator/build/src/options.js
+async function findCommonPathRoot(paths, pathImplementation = import_node_path2.default) {
+  const filesystemRoot = pathImplementation.parse(paths[0]).root;
+  const normalizedFilesystemRoot = filesystemRoot.toLowerCase();
+  if (paths.some((filePath) => pathImplementation.parse(filePath).root.toLowerCase() !== normalizedFilesystemRoot)) {
+    throw new Error("Absolute paths must be on the same filesystem when checked together.");
+  }
+  const servingRoots = await Promise.all(paths.map(async (filePath) => {
+    const stats = await import_node_fs.promises.stat(filePath);
+    return stats.isDirectory() ? filePath : pathImplementation.dirname(filePath);
+  }));
+  let commonRoot = servingRoots[0];
+  for (const servingRoot of servingRoots.slice(1)) {
+    let relativePath = pathImplementation.relative(commonRoot, servingRoot);
+    while (relativePath.split(pathImplementation.sep)[0] === "..") {
+      commonRoot = pathImplementation.dirname(commonRoot);
+      relativePath = pathImplementation.relative(commonRoot, servingRoot);
+    }
+  }
+  return commonRoot;
+}
 async function processOptions(options_) {
   const options = { ...options_ };
   if (options.path.length === 0) {
@@ -68898,13 +70849,22 @@ async function processOptions(options_) {
   if (options.serverRoot && isUrlType) {
     throw new Error("'serverRoot' cannot be defined when the 'path' points to an HTTP endpoint.");
   }
-  if (options.userAgent) {
+  if (options.sitemap && !isUrlType) {
+    throw new Error("'sitemap' can only be used with HTTP paths.");
+  }
+  const headers = options.headers ?? {};
+  if (Object.keys(headers).some((name) => name.toLowerCase() === "user-agent")) {
+    options.headers = Object.fromEntries(Object.entries(headers).map(([name, value]) => [
+      name.toLowerCase() === "user-agent" ? "User-Agent" : name,
+      value
+    ]));
+  } else if (options.userAgent) {
     options.headers = {
       "User-Agent": options.userAgent,
-      ...options.headers ?? {}
+      ...headers
     };
   } else {
-    options.headers = options.headers ?? {};
+    options.headers = headers;
   }
   options.serverRoot &&= import_node_path2.default.normalize(options.serverRoot);
   options.redirects = options.redirects ?? "allow";
@@ -68940,7 +70900,15 @@ async function processOptions(options_) {
   }
   if (!options.serverRoot && !isUrlType) {
     if (options.path.length > 1) {
-      options.serverRoot = import_node_process.default.cwd();
+      if (options.path.some((filePath) => import_node_path2.default.isAbsolute(filePath))) {
+        const absolutePaths = options.path.map((filePath) => import_node_path2.default.resolve(filePath));
+        const serverRoot = await findCommonPathRoot(absolutePaths);
+        options.serverRoot = serverRoot;
+        options.path = absolutePaths.map((filePath) => import_node_path2.default.relative(serverRoot, filePath));
+        options.syntheticServerRoot = options.serverRoot;
+      } else {
+        options.serverRoot = import_node_process.default.cwd();
+      }
     } else {
       const s = await import_node_fs.promises.stat(options.path[0]);
       options.serverRoot = options.path[0];
@@ -68992,6 +70960,15 @@ var Queue = class extends import_node_events2.EventEmitter {
         resolve();
       });
     });
+  }
+  /** Remove retry delays so an aborted run can drain queued work promptly. */
+  runPendingNow() {
+    const now = Date.now();
+    for (const item of this.q) {
+      item.timeToRun = now;
+    }
+    this.cancelWakeup();
+    this.tick();
   }
   tick() {
     if (this.activeFunctions === 0 && this.q.length === 0) {
@@ -69060,7 +71037,7 @@ var import_node_process2 = __toESM(require("node:process"), 1);
 var import_undici2 = __toESM(require_undici2(), 1);
 
 // node_modules/linkinator/build/src/stream-utils.js
-var import_node_stream4 = require("node:stream");
+var import_node_stream3 = require("node:stream");
 async function drainStream(body) {
   if (!body)
     return;
@@ -69077,7 +71054,7 @@ function toNodeReadable(body) {
   if (body && "pipe" in body) {
     return body;
   }
-  return import_node_stream4.Readable.fromWeb(body);
+  return import_node_stream3.Readable.fromWeb(body);
 }
 async function bufferStream(stream4) {
   const chunks = [];
@@ -69112,7 +71089,8 @@ async function makeRequest(method, url2, options) {
   let currentUrl = url2;
   let currentHeaders = { ...DEFAULT_HEADERS, ...options.headers };
   const processRedirectTarget = options.processRedirectTarget;
-  const signal = options.timeout ? AbortSignal.timeout(options.timeout) : void 0;
+  const timeoutSignal = options.timeout ? AbortSignal.timeout(options.timeout) : void 0;
+  const signal = options.signal && timeoutSignal ? AbortSignal.any([options.signal, timeoutSignal]) : options.signal ?? timeoutSignal;
   for (let redirectCount = 0; ; redirectCount++) {
     const requestOptions = {
       method,
@@ -70703,7 +72681,7 @@ async function handleRequest(request, response, root, options) {
       response.statusCode = 301;
       response.setHeader("Content-Type", "text/html; charset=UTF-8");
       response.setHeader("Content-Length", import_node_buffer.Buffer.byteLength(document2));
-      response.setHeader("Location", redirectUrl.href);
+      response.setHeader("Location", `${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`);
       response.end(document2);
       return;
     }
@@ -70770,6 +72748,123 @@ function return404(response) {
     "Content-Type": "text/plain; charset=UTF-8"
   });
   response.end("Not Found");
+}
+
+// node_modules/linkinator/build/src/sitemap.js
+var import_node_stream4 = require("node:stream");
+var import_node_string_decoder3 = require("node:string_decoder");
+var import_node_zlib = require("node:zlib");
+var import_saxes_parser = __toESM(require_saxes_parser(), 1);
+var SitemapXmlError = class extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "SitemapXmlError";
+  }
+};
+async function decodeSitemapSource(source) {
+  const iterator2 = source[Symbol.asyncIterator]();
+  const leadingChunks = [];
+  let leadingLength = 0;
+  while (leadingLength < 2) {
+    const next = await iterator2.next();
+    if (next.done) {
+      break;
+    }
+    const chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
+    leadingChunks.push(chunk);
+    leadingLength += chunk.length;
+  }
+  async function* replayChunks() {
+    try {
+      for (const chunk of leadingChunks) {
+        yield chunk;
+      }
+      for (; ; ) {
+        const next = await iterator2.next();
+        if (next.done) {
+          return;
+        }
+        yield next.value;
+      }
+    } finally {
+      await iterator2.return?.();
+    }
+  }
+  const replay = import_node_stream4.Readable.from(replayChunks());
+  const signature = Buffer.concat(leadingChunks, leadingLength).subarray(0, 2);
+  if (signature[0] !== 31 || signature[1] !== 139) {
+    return replay;
+  }
+  const gunzip = (0, import_node_zlib.createGunzip)();
+  replay.on("error", (error2) => gunzip.destroy(error2));
+  return replay.pipe(gunzip);
+}
+async function parseSitemap(source) {
+  const elements = [];
+  const locations = [];
+  let rootElement;
+  let locationText = "";
+  const decoder = new import_node_string_decoder3.StringDecoder("utf8");
+  const parser = new import_saxes_parser.SaxesParser({ xmlns: true });
+  parser.on("opentag", (tag) => {
+    const element = tag.local.toLowerCase();
+    rootElement ??= element;
+    if (elements.length === 1 && (rootElement === "urlset" && element === "sitemap" || rootElement === "sitemapindex" && element === "url")) {
+      throw new SitemapXmlError(`Invalid <${element}> entry inside <${rootElement}>.`);
+    }
+    elements.push(element);
+    if (element === "loc") {
+      locationText = "";
+    }
+  });
+  const appendText = (text) => {
+    if (elements.at(-1) === "loc") {
+      locationText += text;
+    }
+  };
+  parser.on("text", appendText);
+  parser.on("cdata", appendText);
+  parser.on("closetag", (tag) => {
+    const element = tag.local.toLowerCase();
+    if (element === "loc") {
+      const parent = elements.at(-2);
+      const grandparent = elements.at(-3);
+      const expectedParent = rootElement === "urlset" ? "url" : rootElement === "sitemapindex" ? "sitemap" : void 0;
+      if ((parent === "url" || parent === "sitemap") && (parent !== expectedParent || grandparent !== rootElement)) {
+        throw new SitemapXmlError(`Invalid <${parent}> entry inside <${rootElement}>.`);
+      }
+      if (parent === expectedParent && grandparent === rootElement) {
+        const location = locationText.trim();
+        if (location) {
+          locations.push(location);
+        }
+      }
+      locationText = "";
+    }
+    elements.pop();
+  });
+  parser.on("error", (error2) => {
+    throw new SitemapXmlError(error2.message, { cause: error2 });
+  });
+  const decodedSource = await decodeSitemapSource(source);
+  try {
+    for await (const chunk of decodedSource) {
+      parser.write(decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    }
+    parser.write(decoder.end()).close();
+  } catch (error2) {
+    if (error2 instanceof SitemapXmlError) {
+      throw error2;
+    }
+    throw error2;
+  }
+  if (rootElement !== "urlset" && rootElement !== "sitemapindex") {
+    throw new SitemapXmlError(`Expected a sitemap <urlset> or <sitemapindex> root element, but found ${rootElement ? `<${rootElement}>` : "an empty document"}`);
+  }
+  return {
+    type: rootElement === "sitemapindex" ? "index" : "urlset",
+    locations
+  };
 }
 
 // node_modules/linkinator/build/src/config.js
@@ -70848,9 +72943,117 @@ var LinkState;
   LinkState2["BROKEN"] = "BROKEN";
   LinkState2["SKIPPED"] = "SKIPPED";
 })(LinkState || (LinkState = {}));
+async function mapConcurrently(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  const controller = new AbortController();
+  let nextIndex = 0;
+  let firstError;
+  async function worker() {
+    while (firstError === void 0) {
+      const index = nextIndex++;
+      if (index >= values.length) {
+        return;
+      }
+      try {
+        results[index] = await mapper(values[index], controller.signal);
+      } catch (error2) {
+        if (firstError === void 0) {
+          firstError = error2;
+          controller.abort();
+        }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
+  if (firstError !== void 0) {
+    throw firstError;
+  }
+  return results;
+}
+var RequestLimiter = class {
+  concurrency;
+  active = 0;
+  waiters = [];
+  constructor(concurrency) {
+    this.concurrency = concurrency;
+  }
+  async acquire(signal) {
+    signal.throwIfAborted();
+    if (this.active >= this.concurrency) {
+      await new Promise((resolve, reject) => {
+        const onAvailable = () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const onAbort = () => {
+          const index = this.waiters.indexOf(onAvailable);
+          if (index >= 0) {
+            this.waiters.splice(index, 1);
+            reject(signal.reason);
+          }
+        };
+        this.waiters.push(onAvailable);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    } else {
+      this.active++;
+    }
+  }
+  release() {
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+    } else {
+      this.active--;
+    }
+  }
+  async run(signal, operation) {
+    await this.acquire(signal);
+    let acquired = true;
+    const pause = async (wait) => {
+      this.release();
+      acquired = false;
+      try {
+        return await wait();
+      } finally {
+        if (!signal.aborted) {
+          await this.acquire(signal);
+          acquired = true;
+        }
+        signal.throwIfAborted();
+      }
+    };
+    try {
+      signal.throwIfAborted();
+      return await operation(pause);
+    } finally {
+      if (acquired) {
+        this.release();
+      }
+    }
+  }
+};
+async function waitForRetry(milliseconds, signal) {
+  signal.throwIfAborted();
+  await new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, Math.max(0, milliseconds));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function withDisplayText(result, displayText) {
+  if (displayText !== void 0) {
+    result.displayText = displayText;
+  }
+  return result;
+}
 var LinkChecker = class extends import_node_events3.EventEmitter {
-  // Track which fragments need to be checked for each URL
-  fragmentsToCheck = /* @__PURE__ */ new Map();
   /**
    * Register a crawl as pending, then start it only after the queue grants a
    * concurrency slot. The separate completion promise lets duplicate links
@@ -70864,12 +73067,15 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     options.pendingChecks.set(options.url.href, completion);
     options.queue.add(async () => {
       try {
-        await this.crawl(options);
+        await this.runCrawl(options);
       } finally {
         resolveCompletion();
       }
     });
     return completion;
+  }
+  runCrawl(options) {
+    return options.requestLimiter.run(options.signal, () => this.crawl(options));
   }
   // biome-ignore lint/suspicious/noExplicitAny: this can in fact be generic
   on(event, listener) {
@@ -70916,14 +73122,27 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     const queue = new Queue({
       concurrency: options.concurrency || 100
     });
+    const requestLimiter = new RequestLimiter(options.concurrency || 100);
+    const runController = new AbortController();
+    const retry = Boolean(options_.retry);
+    const retryErrors = Boolean(options_.retryErrors);
+    const retryErrorsCount = options_.retryErrorsCount ?? 5;
+    const retryErrorsJitter = options_.retryErrorsJitter ?? 3e3;
     const results = [];
     const initCache = /* @__PURE__ */ new Set();
     const relationshipCache = /* @__PURE__ */ new Set();
+    const fragmentReferences = /* @__PURE__ */ new Map();
+    const fragmentRelationshipCache = /* @__PURE__ */ new Set();
+    const fragmentPages = /* @__PURE__ */ new Map();
+    const fragmentCandidates = /* @__PURE__ */ new Map();
     const pendingChecks = /* @__PURE__ */ new Map();
     const delayCache = /* @__PURE__ */ new Map();
     const retryErrorsCache = /* @__PURE__ */ new Map();
-    for (const path5 of options.path) {
-      const url2 = new URL(path5);
+    const enqueueTarget = (target) => {
+      const url2 = new URL(target.url);
+      if (initCache.has(url2.href)) {
+        return;
+      }
       initCache.add(url2.href);
       this.enqueueCrawl({
         url: url2,
@@ -70932,18 +73151,50 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
         results,
         cache: initCache,
         relationshipCache,
+        fragmentReferences,
+        fragmentRelationshipCache,
+        fragmentPages,
+        fragmentCandidates,
         pendingChecks,
         delayCache,
         retryErrorsCache,
         queue,
-        rootPath: path5,
-        retry: Boolean(options_.retry),
-        retryErrors: Boolean(options_.retryErrors),
-        retryErrorsCount: options_.retryErrorsCount ?? 5,
-        retryErrorsJitter: options_.retryErrorsJitter ?? 3e3
+        rootPath: target.rootPath,
+        retry,
+        retryErrors,
+        retryErrorsCount,
+        retryErrorsJitter,
+        requestLimiter,
+        signal: runController.signal
       });
+    };
+    if (options.sitemap) {
+      try {
+        await this.discoverSitemapTargets(options, options.sitemap, enqueueTarget, requestLimiter, runController.signal);
+      } catch (error2) {
+        runController.abort(error2);
+        queue.runPendingNow();
+        await queue.onIdle();
+        throw error2;
+      }
+    } else {
+      for (const url2 of options.path) {
+        enqueueTarget({ url: url2, rootPath: url2 });
+      }
     }
     await queue.onIdle();
+    await this.checkRemainingFragments({
+      checkOptions: options,
+      fragmentPages,
+      fragmentReferences,
+      requestLimiter,
+      retry,
+      retryErrors,
+      retryErrorsCount,
+      retryErrorsJitter,
+      results,
+      signal: runController.signal
+    }, fragmentCandidates);
     const result = {
       links: results,
       passed: results.filter((x3) => x3.state === LinkState.BROKEN).length === 0
@@ -70953,6 +73204,171 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     }
     return result;
   }
+  async discoverSitemapTargets(options, configuredSitemap, onTarget, requestLimiter, runSignal) {
+    const paths = options.path;
+    const sitemapUrls = configuredSitemap === true ? paths.map((url2) => new URL("/sitemap.xml", url2).href) : typeof configuredSitemap === "string" ? [configuredSitemap] : configuredSitemap;
+    let pending = [...new Set(sitemapUrls)];
+    const visited = /* @__PURE__ */ new Set();
+    const pageUrls = /* @__PURE__ */ new Set();
+    while (pending.length > 0) {
+      const batch = [];
+      for (const sitemapUrl of pending) {
+        let normalizedUrl;
+        try {
+          normalizedUrl = new URL(this.rewriteUrl(sitemapUrl, options)).href;
+        } catch {
+          throw new Error(`Invalid sitemap URL: ${sitemapUrl}`);
+        }
+        if (!isHttpUrl(normalizedUrl)) {
+          throw new Error(`Invalid sitemap URL protocol: ${normalizedUrl}`);
+        }
+        if (!visited.has(normalizedUrl)) {
+          visited.add(normalizedUrl);
+          batch.push(normalizedUrl);
+        }
+      }
+      pending = [];
+      await mapConcurrently(batch, options.concurrency || 100, async (url2, signal) => {
+        const combinedSignal = AbortSignal.any([signal, runSignal]);
+        const { baseUrl, sitemap, sourceUrl } = await requestLimiter.run(combinedSignal, (pause) => this.loadSitemap(url2, options, combinedSignal, pause));
+        for (const location of sitemap.locations) {
+          let resolvedLocation;
+          try {
+            resolvedLocation = new URL(location, baseUrl).href;
+          } catch {
+            throw new Error(`Invalid URL in sitemap ${sourceUrl}: ${location}`);
+          }
+          if (!isHttpUrl(resolvedLocation)) {
+            throw new Error(`Invalid URL protocol in sitemap ${sourceUrl}: ${location}`);
+          }
+          if (sitemap.type === "index") {
+            pending.push(resolvedLocation);
+            continue;
+          }
+          let rewrittenLocation;
+          try {
+            rewrittenLocation = new URL(this.rewriteUrl(resolvedLocation, options)).href;
+          } catch {
+            throw new Error(`Invalid rewritten URL from sitemap ${sourceUrl}: ${location}`);
+          }
+          if (!isHttpUrl(rewrittenLocation)) {
+            throw new Error(`Invalid rewritten URL protocol in sitemap ${sourceUrl}: ${location}`);
+          }
+          if (!pageUrls.has(rewrittenLocation)) {
+            pageUrls.add(rewrittenLocation);
+            onTarget({
+              url: rewrittenLocation,
+              rootPath: new URL("/", rewrittenLocation).href
+            });
+          }
+        }
+      });
+    }
+    if (pageUrls.size === 0) {
+      throw new Error("The configured sitemap did not contain any page URLs.");
+    }
+  }
+  async loadSitemap(normalizedUrl, options, signal, pauseLimiter) {
+    const redirectMode = options.redirects === "error" ? "manual" : "follow";
+    const processRedirectTarget = redirectMode === "follow" && (this.hasSkipRules(options) || Boolean(options.urlRewriteExpressions?.length)) ? (url2) => this.processRedirectTarget(url2, options) : void 0;
+    let response;
+    let errorRetries = 0;
+    for (; ; ) {
+      try {
+        response = await makeRequest("GET", normalizedUrl, {
+          headers: options.headers,
+          timeout: options.timeout,
+          redirect: redirectMode,
+          allowInsecureCerts: options.allowInsecureCerts,
+          processRedirectTarget,
+          signal
+        });
+      } catch (error2) {
+        if (signal.aborted || !options.retryErrors || errorRetries >= (options.retryErrorsCount ?? 5)) {
+          throw error2;
+        }
+        errorRetries++;
+        const retryDelay = 2 ** errorRetries * 1e3 + Math.random() * (options.retryErrorsJitter ?? 3e3);
+        this.emit("retry", {
+          url: normalizedUrl,
+          status: 0,
+          secondsUntilRetry: Math.round(retryDelay / 1e3)
+        });
+        await pauseLimiter(() => waitForRetry(retryDelay, signal));
+        continue;
+      }
+      const retryAfterRaw = response.headers["retry-after"];
+      if (options.retry && response.status === 429 && retryAfterRaw) {
+        const retryAt = this.parseRetryAfter(retryAfterRaw);
+        if (!Number.isNaN(retryAt)) {
+          const retryDelay = Math.max(0, retryAt - Date.now());
+          await drainStream(response.body);
+          this.emit("retry", {
+            url: normalizedUrl,
+            status: response.status,
+            secondsUntilRetry: Math.round(retryDelay / 1e3)
+          });
+          await pauseLimiter(() => waitForRetry(retryDelay, signal));
+          continue;
+        }
+      }
+      if (options.retryErrors && (response.status >= 500 || response.status === 429) && errorRetries < (options.retryErrorsCount ?? 5)) {
+        errorRetries++;
+        const retryDelay = 2 ** errorRetries * 1e3 + Math.random() * (options.retryErrorsJitter ?? 3e3);
+        await drainStream(response.body);
+        this.emit("retry", {
+          url: normalizedUrl,
+          status: response.status,
+          secondsUntilRetry: Math.round(retryDelay / 1e3)
+        });
+        await pauseLimiter(() => waitForRetry(retryDelay, signal));
+        continue;
+      }
+      if (response.redirectSkipped) {
+        throw new Error(`Sitemap redirected to a URL excluded by a skip rule: ${response.redirectSkipped}`);
+      }
+      if (response.status < 200 || response.status >= 300) {
+        await drainStream(response.body);
+        throw new Error(`Unable to load sitemap ${normalizedUrl}: HTTP ${response.status}`);
+      }
+      if (!response.body) {
+        throw new Error(`Sitemap ${normalizedUrl} returned an empty response.`);
+      }
+      let sitemap;
+      try {
+        sitemap = await parseSitemap(toNodeReadable(response.body));
+      } catch (error2) {
+        if (!(error2 instanceof SitemapXmlError) && !signal.aborted && options.retryErrors && errorRetries < (options.retryErrorsCount ?? 5)) {
+          errorRetries++;
+          const retryDelay = 2 ** errorRetries * 1e3 + Math.random() * (options.retryErrorsJitter ?? 3e3);
+          this.emit("retry", {
+            url: normalizedUrl,
+            status: 0,
+            secondsUntilRetry: Math.round(retryDelay / 1e3)
+          });
+          await pauseLimiter(() => waitForRetry(retryDelay, signal));
+          continue;
+        }
+        const details = error2 instanceof Error ? `: ${error2.message}` : "";
+        throw new Error(`Unable to parse sitemap ${normalizedUrl}${details}`, {
+          cause: error2
+        });
+      }
+      if (options.redirects === "warn" && response.url && response.url !== normalizedUrl) {
+        this.emit("redirect", {
+          url: normalizedUrl,
+          targetUrl: response.url,
+          status: response.status,
+          isNonStandard: false
+        });
+      }
+      return {
+        baseUrl: response.url || normalizedUrl,
+        sitemap,
+        sourceUrl: normalizedUrl
+      };
+    }
+  }
   /**
    * Crawl a given url with the provided options.
    * @pram opts List of options used to do the crawl
@@ -70960,6 +73376,9 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
    * @returns A list of crawl results consisting of urls and status codes
    */
   async crawl(options) {
+    if (options.signal.aborted) {
+      return;
+    }
     options.url.href = this.rewriteUrl(options.url.href, options.checkOptions);
     if (await this.shouldSkipUrl(options.url.href, options.checkOptions)) {
       this.recordSkippedResult(options);
@@ -70972,7 +73391,7 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
       }
       if (timeout > Date.now()) {
         options.queue.add(async () => {
-          await this.crawl(options);
+          await this.runCrawl(options);
         }, {
           delay: timeout - Date.now()
         });
@@ -70992,7 +73411,8 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
       timeout: options.checkOptions.timeout,
       redirect: redirectMode,
       allowInsecureCerts: options.checkOptions.allowInsecureCerts,
-      processRedirectTarget
+      processRedirectTarget,
+      signal: options.signal
     };
     try {
       response = await makeRequest(options.crawl ? "GET" : "HEAD", options.url.href, requestOptions);
@@ -71048,22 +73468,8 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
         failures.push(error2);
       }
     }
-    if (options.checkOptions.checkFragments && response !== void 0 && isHtml(response) && !response.body) {
-      const fragmentsToCheck = this.fragmentsToCheck.get(options.url.href);
-      if (fragmentsToCheck && fragmentsToCheck.size > 0) {
-        try {
-          response = await makeRequest("GET", options.url.href, requestOptions);
-          if (response.redirectSkipped) {
-            this.recordSkippedResult(options);
-            return;
-          }
-          if (response !== void 0) {
-            status = response.status;
-          }
-        } catch (error2) {
-          failures.push(error2);
-        }
-      }
+    if (options.signal.aborted) {
+      return;
     }
     if (this.shouldRetryOnError(status, options)) {
       return;
@@ -71121,67 +73527,47 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     } else if (response !== void 0) {
       failures.push(response);
     }
-    const isHttpUrl = originalUrl.startsWith("http://");
+    const isHttpUrl2 = originalUrl.startsWith("http://");
     const isLocalStaticServer = options.checkOptions.staticHttpServerHost && originalUrl.startsWith(options.checkOptions.staticHttpServerHost);
-    if (isHttpUrl && !isLocalStaticServer && options.checkOptions.requireHttps === "error") {
+    if (isHttpUrl2 && !isLocalStaticServer && options.checkOptions.requireHttps === "error") {
       state = LinkState.BROKEN;
       failures.push(new Error(`HTTP link detected (${originalUrl}) but HTTPS is required`));
-    } else if (isHttpUrl && !isLocalStaticServer && options.checkOptions.requireHttps === "warn") {
+    } else if (isHttpUrl2 && !isLocalStaticServer && options.checkOptions.requireHttps === "warn") {
       this.emit("httpInsecure", {
         url: originalUrl
       });
     }
-    const result = {
+    const result = withDisplayText({
       url: mapUrl(options.url.href, options.checkOptions),
       status,
       state,
       parent: mapUrl(options.parent, options.checkOptions),
       failureDetails: failures
-    };
+    }, options.displayText);
     options.results.push(result);
     this.emit("link", result);
+    options.fragmentCandidates.set(options.url.href, {
+      isHtml: response !== void 0 && isHtml(response),
+      state
+    });
     if (options.checkOptions.checkFragments && response?.body && isHtml(response) && state === LinkState.OK) {
-      const fragmentsToValidate = this.fragmentsToCheck.get(options.url.href);
-      if (fragmentsToValidate && fragmentsToValidate.size > 0) {
-        const nodeStream = toNodeReadable(response.body);
-        const htmlContent = await bufferStream(nodeStream);
-        const htmlString = htmlContent.toString("utf-8");
-        const isSoft404 = htmlString.includes('content="noindex') && htmlString.includes("nofollow");
-        if (!isSoft404) {
-          const validationResults = await validateFragments(htmlContent, fragmentsToValidate);
-          for (const result2 of validationResults) {
-            if (!result2.isValid) {
-              const fragmentResult = {
-                url: mapUrl(`${options.url.href}#${result2.fragment}`, options.checkOptions),
-                status: response.status,
-                state: LinkState.BROKEN,
-                parent: mapUrl(options.parent, options.checkOptions),
-                failureDetails: [
-                  new Error(`Fragment identifier '#${result2.fragment}' not found on page`)
-                ]
-              };
-              options.results.push(fragmentResult);
-              this.emit("link", fragmentResult);
-            }
-          }
-        }
-        const { Readable: Readable4 } = await import("node:stream");
-        const linkStream = Readable4.from([htmlContent]);
-        response.body = linkStream;
-      }
+      const nodeStream = toNodeReadable(response.body);
+      const htmlContent = await bufferStream(nodeStream);
+      const htmlString = htmlContent.toString("utf-8");
+      const isSoft404 = htmlString.includes('content="noindex') && htmlString.includes("nofollow");
+      await this.cacheFragmentPage(options, options.url.href, htmlContent, response.status, !isSoft404);
+      response.body = import_node_stream5.Readable.from([htmlContent]);
     }
     if (options.crawl && shouldRecurse) {
       this.emit("pagestart", options.url);
       let urlResults = [];
-      let htmlContentForFragments;
       if (response?.body) {
         const nodeStream = toNodeReadable(response.body);
         const baseUrl = response.url || options.url.href;
         if (isHtml(response)) {
           if (options.checkOptions.checkFragments) {
-            htmlContentForFragments = await bufferStream(nodeStream);
-            const { Readable: Readable4 } = await import("node:stream");
-            const linkStream = Readable4.from([htmlContentForFragments]);
+            const htmlContent = await bufferStream(nodeStream);
+            const linkStream = import_node_stream5.Readable.from([htmlContent]);
             urlResults = await getLinks(linkStream, baseUrl, options.checkOptions.checkCss);
           } else {
             urlResults = await getLinks(nodeStream, baseUrl, options.checkOptions.checkCss);
@@ -71190,43 +73576,82 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
           urlResults = await getCssLinks(nodeStream, baseUrl);
         }
       }
+      const skippedUrlResults = /* @__PURE__ */ new Set();
+      const skippedFragmentResults = /* @__PURE__ */ new Set();
+      const preferredDisplayTextByUrl = /* @__PURE__ */ new Map();
+      const fallbackDisplayTextByUrl = /* @__PURE__ */ new Map();
+      const preferredDisplayTextByFragment = /* @__PURE__ */ new Map();
+      const urlsWithUnskippedOccurrences = /* @__PURE__ */ new Set();
       for (const result2 of urlResults) {
         if (!result2.url) {
-          const r = {
+          continue;
+        }
+        if (this.hasSkipRules(options.checkOptions) && (result2.url.protocol === "http:" || result2.url.protocol === "https:") && result2.urlWithFragment && await this.shouldSkipUrl(result2.urlWithFragment, options.checkOptions)) {
+          skippedUrlResults.add(result2);
+          continue;
+        }
+        if (result2.displayText !== void 0) {
+          const fallback = fallbackDisplayTextByUrl.get(result2.url.href);
+          if (fallback === void 0 || fallback === "" && result2.displayText !== "") {
+            fallbackDisplayTextByUrl.set(result2.url.href, result2.displayText);
+          }
+        }
+        if (options.checkOptions.checkFragments && result2.fragment && result2.urlWithFragment && await this.shouldSkipFragment(result2.fragment, result2.urlWithFragment, options.checkOptions)) {
+          skippedFragmentResults.add(result2);
+          continue;
+        }
+        urlsWithUnskippedOccurrences.add(result2.url.href);
+        if (result2.displayText === void 0) {
+          continue;
+        }
+        const current = preferredDisplayTextByUrl.get(result2.url.href);
+        if (current === void 0 || current === "" && result2.displayText !== "") {
+          preferredDisplayTextByUrl.set(result2.url.href, result2.displayText);
+        }
+        if (result2.urlWithFragment && result2.fragment) {
+          const fragmentUrl = this.rewriteUrl(result2.url.href, options.checkOptions);
+          const fragmentKey = `${fragmentUrl}#${result2.fragment}`;
+          const fragmentText = preferredDisplayTextByFragment.get(fragmentKey);
+          if (fragmentText === void 0 || fragmentText === "" && result2.displayText !== "") {
+            preferredDisplayTextByFragment.set(fragmentKey, result2.displayText);
+          }
+        }
+      }
+      for (const result2 of urlResults) {
+        if (!result2.url) {
+          const r = withDisplayText({
             url: mapUrl(result2.link, options.checkOptions),
             status: 0,
             state: LinkState.BROKEN,
             parent: mapUrl(options.url.href, options.checkOptions)
-          };
+          }, result2.displayText);
           options.results.push(r);
           this.emit("link", r);
           continue;
         }
-        if (this.hasSkipRules(options.checkOptions) && (result2.url.protocol === "http:" || result2.url.protocol === "https:") && result2.urlWithFragment && await this.shouldSkipUrl(result2.urlWithFragment, options.checkOptions)) {
-          const skippedResult = {
+        const preferredDisplayText = preferredDisplayTextByUrl.get(result2.url.href) ?? (urlsWithUnskippedOccurrences.has(result2.url.href) ? void 0 : fallbackDisplayTextByUrl.get(result2.url.href));
+        if (skippedUrlResults.has(result2)) {
+          const skippedResult = withDisplayText({
             url: mapUrl(result2.urlWithFragment, options.checkOptions),
             state: LinkState.SKIPPED,
             parent: mapUrl(options.url.href, options.checkOptions)
-          };
+          }, result2.displayText);
           options.results.push(skippedResult);
           this.emit("link", skippedResult);
           continue;
         }
         if (options.checkOptions.checkFragments && result2.fragment && result2.fragment.length > 0) {
-          if (await this.shouldSkipFragment(result2.fragment, result2.urlWithFragment ?? result2.url.href, options.checkOptions)) {
-            const skippedFragmentResult = {
-              url: mapUrl(result2.urlWithFragment ?? result2.url.href, options.checkOptions),
+          if (skippedFragmentResults.has(result2)) {
+            const skippedFragmentResult = withDisplayText({
+              url: mapUrl(result2.urlWithFragment, options.checkOptions),
               state: LinkState.SKIPPED,
               parent: mapUrl(options.url.href, options.checkOptions)
-            };
+            }, result2.displayText);
             options.results.push(skippedFragmentResult);
             this.emit("link", skippedFragmentResult);
           } else {
-            const urlKey = result2.url.href;
-            if (!this.fragmentsToCheck.has(urlKey)) {
-              this.fragmentsToCheck.set(urlKey, /* @__PURE__ */ new Set());
-            }
-            this.fragmentsToCheck.get(urlKey)?.add(result2.fragment);
+            const fragmentUrl = this.rewriteUrl(result2.url.href, options.checkOptions);
+            this.registerFragmentReference(options, fragmentUrl, result2.fragment, preferredDisplayTextByFragment.get(`${fragmentUrl}#${result2.fragment}`));
           }
         }
         let crawl = options.checkOptions.recurse && result2.url?.href.startsWith(options.rootPath);
@@ -71250,9 +73675,14 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
           }
           this.enqueueCrawl({
             url: result2.url,
+            displayText: preferredDisplayText,
             crawl: crawl ?? false,
             cache: options.cache,
             relationshipCache: options.relationshipCache,
+            fragmentReferences: options.fragmentReferences,
+            fragmentRelationshipCache: options.fragmentRelationshipCache,
+            fragmentPages: options.fragmentPages,
+            fragmentCandidates: options.fragmentCandidates,
             pendingChecks: options.pendingChecks,
             delayCache: options.delayCache,
             retryErrorsCache: options.retryErrorsCache,
@@ -71264,7 +73694,9 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
             retry: options.retry,
             retryErrors: options.retryErrors,
             retryErrorsCount: options.retryErrorsCount,
-            retryErrorsJitter: options.retryErrorsJitter
+            retryErrorsJitter: options.retryErrorsJitter,
+            requestLimiter: options.requestLimiter,
+            signal: options.signal
           });
         } else {
           const urlHref = result2.url.href;
@@ -71276,43 +73708,159 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
             }
             const cachedResult = options.results.find((r) => r.url === mapUrl(urlHref, options.checkOptions));
             if (cachedResult && cachedResult.state === LinkState.BROKEN) {
-              const reusedResult = {
+              const reusedResult = withDisplayText({
                 url: cachedResult.url,
                 status: cachedResult.status,
                 state: cachedResult.state,
                 parent: mapUrl(parentHref, options.checkOptions),
                 failureDetails: cachedResult.failureDetails
-              };
+              }, preferredDisplayText);
               options.results.push(reusedResult);
               this.emit("link", reusedResult);
             }
           });
         }
       }
-      if (options.checkOptions.checkFragments && htmlContentForFragments && response && isHtml(response) && state === LinkState.OK) {
-        const samePageFragments = this.fragmentsToCheck.get(options.url.href);
-        if (samePageFragments && samePageFragments.size > 0) {
-          const validationResults = await validateFragments(htmlContentForFragments, samePageFragments);
-          for (const result2 of validationResults) {
-            if (!result2.isValid) {
-              const fragmentResult = {
-                url: mapUrl(`${options.url.href}#${result2.fragment}`, options.checkOptions),
-                status: response.status,
-                state: LinkState.BROKEN,
-                parent: mapUrl(options.parent, options.checkOptions),
-                failureDetails: [
-                  new Error(`Fragment identifier '#${result2.fragment}' not found on page`)
-                ]
-              };
-              options.results.push(fragmentResult);
-              this.emit("link", fragmentResult);
-            }
+    }
+    await drainStream(response?.body);
+  }
+  async checkRemainingFragments(context, fragmentCandidates) {
+    const redirectMode = context.checkOptions.redirects === "error" ? "manual" : "follow";
+    const processRedirectTarget = redirectMode === "follow" && (this.hasSkipRules(context.checkOptions) || Boolean(context.checkOptions.urlRewriteExpressions?.length)) ? (url2) => this.processRedirectTarget(url2, context.checkOptions) : void 0;
+    const requestOptions = {
+      headers: context.checkOptions.headers,
+      timeout: context.checkOptions.timeout,
+      redirect: redirectMode,
+      allowInsecureCerts: context.checkOptions.allowInsecureCerts,
+      processRedirectTarget
+    };
+    const checks = [];
+    for (const url2 of context.fragmentReferences.keys()) {
+      const candidate = fragmentCandidates.get(url2);
+      if (!candidate || candidate.state !== LinkState.OK || !candidate.isHtml) {
+        continue;
+      }
+      checks.push(context.requestLimiter.run(context.signal, (pause) => this.cacheRemainingFragmentPage(context, url2, requestOptions, pause)));
+    }
+    await Promise.all(checks);
+  }
+  async cacheRemainingFragmentPage(context, url2, requestOptions, pauseLimiter) {
+    let errorRetries = 0;
+    for (; ; ) {
+      let response;
+      try {
+        response = await makeRequest("GET", url2, {
+          ...requestOptions,
+          signal: context.signal
+        });
+        const retryAfterRaw = response.headers["retry-after"];
+        if (context.retry && response.status === 429 && retryAfterRaw) {
+          const retryAt = this.parseRetryAfter(retryAfterRaw);
+          if (!Number.isNaN(retryAt)) {
+            const retryDelay = Math.max(0, retryAt - Date.now());
+            await drainStream(response.body);
+            this.emit("retry", {
+              url: url2,
+              status: response.status,
+              secondsUntilRetry: Math.round(retryDelay / 1e3)
+            });
+            await pauseLimiter(() => waitForRetry(retryDelay, context.signal));
+            continue;
           }
-          this.fragmentsToCheck.delete(options.url.href);
+        }
+        if (context.retryErrors && (response.status >= 500 || response.status === 429) && errorRetries < context.retryErrorsCount) {
+          errorRetries++;
+          const retryDelay = 2 ** errorRetries * 1e3 + Math.random() * context.retryErrorsJitter;
+          await drainStream(response.body);
+          this.emit("retry", {
+            url: url2,
+            status: response.status,
+            secondsUntilRetry: Math.round(retryDelay / 1e3)
+          });
+          await pauseLimiter(() => waitForRetry(retryDelay, context.signal));
+          continue;
+        }
+        if (response.redirectSkipped || response.status < 200 || response.status >= 300 || !response.body || !isHtml(response)) {
+          await drainStream(response.body);
+          context.fragmentReferences.delete(url2);
+          return;
+        }
+        const htmlContent = await bufferStream(toNodeReadable(response.body));
+        const htmlString = htmlContent.toString("utf-8");
+        const isSoft404 = htmlString.includes('content="noindex') && htmlString.includes("nofollow");
+        await this.cacheFragmentPage(context, url2, htmlContent, response.status, !isSoft404);
+        return;
+      } catch {
+        if (!context.retryErrors || errorRetries >= context.retryErrorsCount) {
+          context.fragmentReferences.delete(url2);
+          return;
+        }
+        errorRetries++;
+        const retryDelay = 2 ** errorRetries * 1e3 + Math.random() * context.retryErrorsJitter;
+        this.emit("retry", {
+          url: url2,
+          status: 0,
+          secondsUntilRetry: Math.round(retryDelay / 1e3)
+        });
+        await pauseLimiter(() => waitForRetry(retryDelay, context.signal));
+      }
+    }
+  }
+  async cacheFragmentPage(context, url2, htmlContent, status, shouldValidate) {
+    const validFragments = shouldValidate ? await extractFragmentIds(import_node_stream5.Readable.from([htmlContent])) : void 0;
+    context.fragmentPages.set(url2, { status, validFragments });
+    const fragmentsToValidate = context.fragmentReferences.get(url2);
+    context.fragmentReferences.delete(url2);
+    if (!validFragments || !fragmentsToValidate) {
+      return;
+    }
+    for (const [fragment, references] of fragmentsToValidate) {
+      if (!isValidFragment(fragment, validFragments)) {
+        for (const reference of references.values()) {
+          this.recordBrokenFragment(context, url2, fragment, status, reference);
         }
       }
     }
-    await drainStream(response?.body);
+  }
+  recordBrokenFragment(context, url2, fragment, status, reference) {
+    const fragmentResult = withDisplayText({
+      url: mapUrl(`${url2}#${fragment}`, context.checkOptions),
+      status,
+      state: LinkState.BROKEN,
+      parent: mapUrl(reference.parent, context.checkOptions),
+      failureDetails: [
+        new Error(`Fragment identifier '#${fragment}' not found on page`)
+      ]
+    }, reference.displayText);
+    context.results.push(fragmentResult);
+    this.emit("link", fragmentResult);
+  }
+  registerFragmentReference(options, url2, fragment, displayText) {
+    const parent = options.url.href;
+    const relationshipKey = `${url2}#${fragment}|${parent}`;
+    if (options.fragmentRelationshipCache.has(relationshipKey)) {
+      return;
+    }
+    options.fragmentRelationshipCache.add(relationshipKey);
+    const reference = { displayText, parent };
+    const fragmentPage = options.fragmentPages.get(url2);
+    if (fragmentPage) {
+      if (fragmentPage.validFragments && !isValidFragment(fragment, fragmentPage.validFragments)) {
+        this.recordBrokenFragment(options, url2, fragment, fragmentPage.status, reference);
+      }
+      return;
+    }
+    let fragmentsForUrl = options.fragmentReferences.get(url2);
+    if (!fragmentsForUrl) {
+      fragmentsForUrl = /* @__PURE__ */ new Map();
+      options.fragmentReferences.set(url2, fragmentsForUrl);
+    }
+    let references = fragmentsForUrl.get(fragment);
+    if (!references) {
+      references = /* @__PURE__ */ new Map();
+      fragmentsForUrl.set(fragment, references);
+    }
+    references.set(parent, reference);
   }
   hasSkipRules(checkOptions) {
     return typeof checkOptions.linksToSkip === "function" || Array.isArray(checkOptions.linksToSkip) && checkOptions.linksToSkip.length > 0;
@@ -71348,12 +73896,12 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     return Boolean(checkOptions.fragmentsToSkip?.some((fragmentToSkip) => new RegExp(fragmentToSkip).test(fragment)));
   }
   recordSkippedResult(options) {
-    const result = {
+    const result = withDisplayText({
       url: mapUrl(options.url.href, options.checkOptions),
       status: options.url.protocol === "http:" || options.url.protocol === "https:" ? void 0 : 0,
       state: LinkState.SKIPPED,
       parent: mapUrl(options.parent, options.checkOptions)
-    };
+    }, options.displayText);
     options.results.push(result);
     this.emit("link", result);
   }
@@ -71404,7 +73952,7 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
       options.delayCache.set(options.url.host, retryAfter);
     }
     options.queue.add(async () => {
-      await this.crawl(options);
+      await this.runCrawl(options);
     }, {
       delay: retryAfter - Date.now()
     });
@@ -71439,7 +73987,7 @@ var LinkChecker = class extends import_node_events3.EventEmitter {
     options.retryErrorsCache.set(options.url.href, currentRetry);
     const retryAfter = 2 ** currentRetry * 1e3 + Math.random() * options.retryErrorsJitter;
     options.queue.add(async () => {
-      await this.crawl(options);
+      await this.runCrawl(options);
     }, {
       delay: retryAfter
     });
@@ -71459,6 +74007,10 @@ function isHtml(response) {
 function isCss(response) {
   const contentType = response.headers["content-type"] || "";
   return Boolean(/text\/css/g.test(contentType));
+}
+function isHttpUrl(url2) {
+  const protocol = new URL(url2).protocol;
+  return protocol === "http:" || protocol === "https:";
 }
 function mapUrl(url2, options) {
   if (!url2) {
@@ -71505,14 +74057,25 @@ function getStatusCodeAction(status, statusCodes) {
 function detectRedirect(status, originalUrl, response) {
   const isRedirectStatus = status >= 300 && status < 400;
   const urlChanged = response?.url && response.url !== originalUrl;
-  const hasLocation = Boolean(response?.headers.location);
+  const location = response?.headers.location;
+  const hasLocation = location !== void 0;
   const hasBody = response?.body !== void 0;
-  const isNonStandard = isRedirectStatus && (!hasLocation || hasBody && !hasLocation);
+  let targetUrl;
+  if (isRedirectStatus && hasLocation) {
+    try {
+      targetUrl = new URL(location, response?.url || originalUrl).href;
+    } catch {
+      targetUrl = location;
+    }
+  } else if (urlChanged) {
+    targetUrl = response.url;
+  }
+  const isNonStandard = isRedirectStatus && !hasLocation;
   return {
     isRedirect: isRedirectStatus,
     wasFollowed: Boolean(urlChanged || isRedirectStatus && hasBody),
     isNonStandard,
-    targetUrl: response?.url || response?.headers.location
+    targetUrl
   };
 }
 
@@ -71978,6 +74541,33 @@ escape-html/index.js:
    * Copyright(c) 2015 Andreas Lubbe
    * Copyright(c) 2015 Tiancheng "Timothy" Gu
    * MIT Licensed
+   *)
+
+xmlchars/xml/1.0/ed5.js:
+  (**
+   * Character classes and associated utilities for the 5th edition of XML 1.0.
+   *
+   * @author Louis-Dominique Dubeau
+   * @license MIT
+   * @copyright Louis-Dominique Dubeau
+   *)
+
+xmlchars/xml/1.1/ed2.js:
+  (**
+   * Character classes and associated utilities for the 2nd edition of XML 1.1.
+   *
+   * @author Louis-Dominique Dubeau
+   * @license MIT
+   * @copyright Louis-Dominique Dubeau
+   *)
+
+xmlchars/xmlns/1.0/ed3.js:
+  (**
+   * Character class utilities for XML NS 1.0 edition 3.
+   *
+   * @author Louis-Dominique Dubeau
+   * @license MIT
+   * @copyright Louis-Dominique Dubeau
    *)
 */
 //# sourceMappingURL=index.cjs.map

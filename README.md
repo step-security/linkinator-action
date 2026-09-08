@@ -126,7 +126,7 @@ Recursive scans follow links on the same root domain. Use a reasonable concurren
 Set `sitemap` to load `/sitemap.xml` from each URL in `paths` and check every page it lists:
 
 ```yaml
-- uses: JustinBeckwith/linkinator-action@v2
+- uses: step-security/linkinator-action@v2
   with:
     paths: https://example.com
     sitemap: true
@@ -135,7 +135,7 @@ Set `sitemap` to load `/sitemap.xml` from each URL in `paths` and check every pa
 Sitemap indexes are followed recursively. To use one or more custom sitemap locations, pass comma- or whitespace-separated URLs with `sitemapUrl` instead:
 
 ```yaml
-- uses: JustinBeckwith/linkinator-action@v2
+- uses: step-security/linkinator-action@v2
   with:
     paths: https://example.com
     sitemapUrl: >-
