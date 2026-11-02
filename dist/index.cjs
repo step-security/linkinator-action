@@ -1857,10 +1857,66 @@ var require_request = __commonJS({
           return false;
         }
       }
-      onUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number|null} statusCode
+       * @param {Buffer[]|null} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert(!this.aborted);
         assert(!this.completed);
-        return this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (statusCode !== null) {
+          this.#publishUpgradeHeaders(statusCode, headers, statusText);
+        }
+        const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (statusCode !== null) {
+            this.#publishUpgradeTrailers();
+          }
+        }
+        return result;
+      }
+      /**
+       * @param {number} statusCode
+       * @param {import('node:http2').IncomingHttpHeaders} headers
+       * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+       * @param {string} [statusText]
+       */
+      onUpgradeResponse(statusCode, headers, parseHeaders, statusText = "") {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.headers.hasSubscribers) {
+          this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText);
+        }
+        this.#publishUpgradeTrailers();
+      }
+      /**
+       * @param {Error} error
+       */
+      onUpgradeError(error2) {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.error.hasSubscribers) {
+          channels.error.publish({ request: this, error: error2 });
+        }
+      }
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]} headers
+       * @param {string} statusText
+       */
+      #publishUpgradeHeaders(statusCode, headers, statusText) {
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
+      }
+      #publishUpgradeTrailers() {
+        if (channels.trailers.hasSubscribers) {
+          channels.trailers.publish({ request: this, trailers: [] });
+        }
       }
       onComplete(trailers) {
         this.onFinally();
@@ -2045,6 +2101,7 @@ var require_dispatcher = __commonJS({
 var require_dispatcher_base = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/dispatcher/dispatcher-base.js"(exports2, module2) {
     "use strict";
+    var buffer = require("node:buffer");
     var Dispatcher = require_dispatcher();
     var {
       ClientDestroyedError,
@@ -2056,6 +2113,7 @@ var require_dispatcher_base = __commonJS({
     var kOnClosed = /* @__PURE__ */ Symbol("onClosed");
     var kInterceptedDispatch = /* @__PURE__ */ Symbol("Intercepted Dispatch");
     var kWebSocketOptions = /* @__PURE__ */ Symbol("webSocketOptions");
+    var kEventSourceOptions = /* @__PURE__ */ Symbol("eventSourceOptions");
     var DispatcherBase = class extends Dispatcher {
       constructor(opts) {
         super();
@@ -2064,11 +2122,17 @@ var require_dispatcher_base = __commonJS({
         this[kClosed] = false;
         this[kOnClosed] = [];
         this[kWebSocketOptions] = opts?.webSocket ?? {};
+        this[kEventSourceOptions] = opts?.eventSource ?? {};
       }
       get webSocketOptions() {
         return {
           maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
           maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+        };
+      }
+      get eventSourceOptions() {
+        return {
+          maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer.kStringMaxLength
         };
       }
       get destroyed() {
@@ -6003,7 +6067,7 @@ var require_client_h1 = __commonJS({
         }
       }
       onUpgrade(head) {
-        const { upgrade, client, socket, headers, statusCode } = this;
+        const { upgrade, client, socket, headers, statusCode, statusText } = this;
         assert(upgrade);
         assert(client[kSocket] === socket);
         assert(!socket.destroyed);
@@ -6028,9 +6092,10 @@ var require_client_h1 = __commonJS({
         client[kQueue][client[kRunningIdx]++] = null;
         client.emit("disconnect", client[kUrl], [client], new InformationalError("upgrade"));
         try {
-          request.onUpgrade(statusCode, headers, socket);
-        } catch (err) {
-          util4.destroy(socket, err);
+          request.onUpgrade(statusCode, headers, socket, statusText);
+        } catch (error2) {
+          util4.errorRequest(client, request, error2);
+          util4.destroy(socket, error2);
         }
         client[kResume]();
       }
@@ -6217,7 +6282,6 @@ var require_client_h1 = __commonJS({
       socket[kSocketUsed] = false;
       socket[kParser] = new Parser2(client, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
           const parserErr = parser.finish();
@@ -6322,21 +6386,20 @@ var require_client_h1 = __commonJS({
     }
     function clearIdleSocketValidation(socket) {
       if (socket[kIdleSocketValidationTimeout]) {
-        clearTimeout(socket[kIdleSocketValidationTimeout]);
+        clearImmediate(socket[kIdleSocketValidationTimeout]);
         socket[kIdleSocketValidationTimeout] = null;
       }
       socket[kIdleSocketValidation] = 0;
     }
     function scheduleIdleSocketValidation(client, socket) {
       socket[kIdleSocketValidation] = 1;
-      socket[kIdleSocketValidationTimeout] = setTimeout(() => {
+      socket[kIdleSocketValidationTimeout] = setImmediate(() => {
         socket[kIdleSocketValidationTimeout] = null;
         socket[kIdleSocketValidation] = 2;
         if (client[kSocket] === socket && !socket.destroyed) {
           client[kResume]();
         }
-      }, 0);
-      socket[kIdleSocketValidationTimeout].unref?.();
+      });
     }
     function resumeH1(client) {
       const socket = client[kSocket];
@@ -6434,11 +6497,17 @@ var require_client_h1 = __commonJS({
       }
       const socket = client[kSocket];
       clearIdleSocketValidation(socket);
-      const abort = (err) => {
-        if (request.aborted || request.completed) {
+      const abort = (error2) => {
+        if (request.aborted) {
           return;
         }
-        util4.errorRequest(client, request, err || new RequestAbortedError());
+        if (request.completed) {
+          if (request.upgrade || request.method === "CONNECT") {
+            util4.destroy(socket, new InformationalError("aborted"));
+          }
+          return;
+        }
+        util4.errorRequest(client, request, error2 || new RequestAbortedError());
         util4.destroy(body);
         util4.destroy(socket, new InformationalError("aborted"));
       };
@@ -6794,6 +6863,7 @@ var require_client_h2 = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/dispatcher/client-h2.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
+    var { errorMonitor } = require("node:events");
     var { pipeline } = require("node:stream");
     var util4 = require_util();
     var {
@@ -6854,6 +6924,10 @@ var require_client_h2 = __commonJS({
       }
       return result;
     }
+    function parseH2ResponseHeaders(headers) {
+      const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers;
+      return parseH2Headers(realHeaders);
+    }
     async function connectH2(client, socket) {
       client[kSocket] = socket;
       if (!h2ExperimentalWarned) {
@@ -6891,7 +6965,6 @@ var require_client_h2 = __commonJS({
       client[kHTTP2Session] = session;
       socket[kHTTP2Session] = session;
       util4.addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         this[kError] = err;
         this[kClient][kOnError](err);
       });
@@ -6950,7 +7023,6 @@ var require_client_h2 = __commonJS({
       }
     }
     function onHttp2SessionError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
       this[kClient][kOnError](err);
     }
@@ -7017,16 +7089,22 @@ var require_client_h2 = __commonJS({
       const { hostname, port } = client[kUrl];
       headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ""}`;
       headers[HTTP2_HEADER_METHOD] = method;
-      const abort = (err) => {
-        if (request.aborted || request.completed) {
+      const abort = (error2) => {
+        if (request.aborted) {
           return;
         }
-        err = err || new RequestAbortedError();
-        util4.errorRequest(client, request, err);
-        if (stream4 != null) {
-          util4.destroy(stream4, err);
+        if (request.completed) {
+          if (method === "CONNECT" && stream4 != null) {
+            util4.destroy(stream4, error2 || new RequestAbortedError());
+          }
+          return;
         }
-        util4.destroy(body, err);
+        error2 = error2 || new RequestAbortedError();
+        util4.errorRequest(client, request, error2);
+        if (stream4 != null) {
+          util4.destroy(stream4, error2);
+        }
+        util4.destroy(body, error2);
         client[kQueue][client[kRunningIdx]++] = null;
         client[kResume]();
       };
@@ -7041,18 +7119,42 @@ var require_client_h2 = __commonJS({
       if (method === "CONNECT") {
         session.ref();
         stream4 = session.request(headers, { endStream: false, signal });
-        if (stream4.id && !stream4.pending) {
-          request.onUpgrade(null, null, stream4);
-          ++session[kOpenStreams];
-          client[kQueue][client[kRunningIdx]++] = null;
-        } else {
-          stream4.once("ready", () => {
+        let upgradeResponseFinished = false;
+        const onResponse = (headers2) => {
+          upgradeResponseFinished = true;
+          stream4.off(errorMonitor, onUpgradeError);
+          request.onUpgradeResponse(Number(headers2[HTTP2_HEADER_STATUS]), headers2, parseH2ResponseHeaders);
+        };
+        const onUpgradeError = (error2) => {
+          upgradeResponseFinished = true;
+          stream4.off("response", onResponse);
+          request.onUpgradeError(error2);
+        };
+        const onReady = () => {
+          try {
             request.onUpgrade(null, null, stream4);
-            ++session[kOpenStreams];
-            client[kQueue][client[kRunningIdx]++] = null;
-          });
-        }
+          } catch (error2) {
+            stream4.off("response", onResponse);
+            abort(error2);
+            return;
+          }
+          if (request.aborted) {
+            return;
+          }
+          stream4.off("error", abort);
+          stream4.once(errorMonitor, onUpgradeError);
+          client[kQueue][client[kRunningIdx]++] = null;
+        };
+        stream4.once("response", onResponse);
+        stream4.once("error", abort);
+        ++session[kOpenStreams];
+        onReady();
         stream4.once("close", () => {
+          if (!upgradeResponseFinished && request.completed) {
+            stream4.off("response", onResponse);
+            stream4.off(errorMonitor, onUpgradeError);
+            request.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream4.rstCode}`));
+          }
           session[kOpenStreams] -= 1;
           if (session[kOpenStreams] === 0) session.unref();
         });
@@ -7614,9 +7716,10 @@ var require_client = __commonJS({
         // h2
         maxConcurrentStreams,
         allowH2,
-        webSocket
+        webSocket,
+        eventSource
       } = {}) {
-        super({ webSocket });
+        super({ webSocket, eventSource });
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
         }
@@ -8513,7 +8616,7 @@ var require_agent = __commonJS({
       return opts && opts.connections === 1 ? new Client(origin2, opts) : new Pool(origin2, opts);
     }
     var Agent2 = class extends DispatcherBase {
-      constructor({ factory: factory2 = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
+      constructor({ factory: factory2 = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
         if (typeof factory2 !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -8527,8 +8630,11 @@ var require_agent = __commonJS({
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
+        if (tls && typeof tls !== "function") {
+          tls = { ...tls };
+        }
         this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent) ? options.interceptors.Agent : [createRedirectInterceptor({ maxRedirections })];
-        this[kOptions] = { ...util4.deepClone(options), connect };
+        this[kOptions] = { ...util4.deepClone(options), connect, tls };
         this[kOptions].interceptors = options.interceptors ? { ...options.interceptors } : void 0;
         this[kMaxRedirections] = maxRedirections;
         this[kFactory] = factory2;
@@ -9035,6 +9141,7 @@ var require_retry_handler = __commonJS({
         this.end = null;
         this.etag = null;
         this.resume = null;
+        this.headersSent = false;
         this.handler.onConnect((reason) => {
           this.aborted = true;
           if (this.abort) {
@@ -9043,6 +9150,17 @@ var require_retry_handler = __commonJS({
             this.reason = reason;
           }
         });
+      }
+      checkpointResponseEnd(headers, resume) {
+        if (this.end == null && this.opts.method !== "HEAD") {
+          const contentLength = headers["content-length"];
+          this.end = contentLength != null ? Number(contentLength) - 1 : null;
+          assert(
+            this.end == null || Number.isFinite(this.end),
+            "invalid content-length"
+          );
+        }
+        this.resume = this.end != null ? resume : null;
       }
       onRequestSent() {
         if (this.handler.onRequestSent) {
@@ -9105,7 +9223,9 @@ var require_retry_handler = __commonJS({
         const headers = parseHeaders(rawHeaders);
         this.retryCount += 1;
         if (statusCode >= 300) {
-          if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+          if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
+            this.headersSent = true;
+            this.checkpointResponseEnd(headers, resume);
             return this.handler.onHeaders(
               statusCode,
               rawHeaders,
@@ -9160,8 +9280,15 @@ var require_retry_handler = __commonJS({
             return false;
           }
           const { start, size, end = size - 1 } = contentRange;
-          assert(this.start === start, "content-range mismatch");
-          assert(this.end == null || this.end === end, "content-range mismatch");
+          if (this.start !== start || this.end != null && this.end !== end) {
+            this.abort(
+              new RequestRetryError("Content-Range mismatch", statusCode, {
+                headers,
+                data: { count: this.retryCount }
+              })
+            );
+            return false;
+          }
           this.resume = resume;
           return true;
         }
@@ -9169,6 +9296,7 @@ var require_retry_handler = __commonJS({
           if (statusCode === 206) {
             const range = parseRangeHeader(headers["content-range"]);
             if (range == null) {
+              this.headersSent = true;
               return this.handler.onHeaders(
                 statusCode,
                 rawHeaders,
@@ -9200,6 +9328,7 @@ var require_retry_handler = __commonJS({
             "invalid content-length"
           );
           this.resume = resume;
+          this.headersSent = true;
           this.etag = headers.etag != null ? headers.etag : null;
           if (this.etag != null && this.etag.startsWith("W/")) {
             this.etag = null;
@@ -9227,7 +9356,7 @@ var require_retry_handler = __commonJS({
         return this.handler.onComplete(rawTrailers);
       }
       onError(err) {
-        if (this.aborted || isDisturbed(this.opts.body)) {
+        if (this.aborted || isDisturbed(this.opts.body) || this.headersSent && this.resume == null) {
           return this.handler.onError(err);
         }
         if (this.retryCount - this.retryCountCheckpoint > 0) {
@@ -14233,8 +14362,9 @@ var require_fetch = __commonJS({
         }
       );
       response.body = { stream: stream4, source: null, length: null };
-      fetchParams.controller.onAborted = onAborted;
-      fetchParams.controller.on("terminated", onAborted);
+      if (!fetchParams.controller.resume) {
+        fetchParams.controller.on("terminated", onAborted);
+      }
       fetchParams.controller.resume = async () => {
         while (true) {
           let bytes;
@@ -14334,7 +14464,6 @@ var require_fetch = __commonJS({
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
               location = headersList.get("location", true);
-              this.body = new Readable5({ read: resume });
               const decoders = [];
               const willFollow = location && request.redirect === "follow" && redirectStatusSet.has(status);
               if (request.method !== "HEAD" && request.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -14342,7 +14471,7 @@ var require_fetch = __commonJS({
                 const codings = contentEncoding ? contentEncoding.toLowerCase().split(",") : [];
                 const maxContentEncodings = 5;
                 if (codings.length > maxContentEncodings) {
-                  reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+                  this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
                   return true;
                 }
                 for (let i = codings.length - 1; i >= 0; --i) {
@@ -14372,6 +14501,7 @@ var require_fetch = __commonJS({
                   }
                 }
               }
+              this.body = new Readable5({ read: resume });
               const onError = this.onError.bind(this);
               resolve({
                 status,
@@ -14396,9 +14526,6 @@ var require_fetch = __commonJS({
             onComplete() {
               if (this.abort) {
                 fetchParams.controller.off("terminated", this.abort);
-              }
-              if (fetchParams.controller.onAborted) {
-                fetchParams.controller.off("terminated", fetchParams.controller.onAborted);
               }
               fetchParams.controller.ended = true;
               this.body.push(null);
@@ -17113,7 +17240,7 @@ var require_connection = __commonJS({
           const secProtocol = response.headersList.get("Sec-WebSocket-Protocol");
           if (secProtocol !== null) {
             const requestProtocols = getDecodeSplit("sec-websocket-protocol", request.headersList);
-            if (!requestProtocols.includes(secProtocol)) {
+            if (requestProtocols === null || !requestProtocols.includes(secProtocol)) {
               failWebsocketConnection(ws2, "Protocol was not set in the opening handshake.");
               return;
             }
@@ -17261,6 +17388,7 @@ var require_permessage_deflate = __commonJS({
             if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
               callback(new MessageSizeExceededError());
               this.#inflate.removeAllListeners();
+              this.#inflate.destroy();
               this.#inflate = null;
               return;
             }
@@ -17472,6 +17600,16 @@ var require_receiver = __commonJS({
             if (isControlFrame(this.#info.opcode)) {
               this.#loop = this.parseControlFrame(body);
               this.#state = parserStates.INFO;
+              const socket = this.ws[kResponse].socket;
+              if (this.#loop && socket.writableNeedDrain) {
+                this.#loop = false;
+                socket.once("drain", () => {
+                  if (this.destroyed) return;
+                  this.#loop = true;
+                  this.run(callback);
+                });
+                return;
+              }
             } else {
               if (!this.#info.compressed) {
                 if (!this.writeFragments(body)) {
@@ -18165,6 +18303,7 @@ var require_util8 = __commonJS({
 var require_eventsource_stream = __commonJS({
   "node_modules/@actions/http-client/node_modules/undici/lib/web/eventsource/eventsource-stream.js"(exports2, module2) {
     "use strict";
+    var buffer = require("node:buffer");
     var { Transform } = require("node:stream");
     var { isASCIINumber, isValidLastEventId } = require_util8();
     var BOM = [239, 187, 191];
@@ -18172,6 +18311,49 @@ var require_eventsource_stream = __commonJS({
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var defaultMaxEventSize = buffer.kStringMaxLength;
+    var DATA = Buffer.from("data");
+    var EVENT = Buffer.from("event");
+    var ID = Buffer.from("id");
+    var RETRY = Buffer.from("retry");
+    var minParserItems = 1024;
+    var maxParserItems = 131072;
+    var bytesPerParserItem = 128;
+    function isASCIINumberBytes(buffer2, start) {
+      if (start >= buffer2.length) {
+        return false;
+      }
+      for (let i = start; i < buffer2.length; i++) {
+        if (buffer2[i] < 48 || buffer2[i] > 57) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function isValidLastEventIdBytes(buffer2, start) {
+      for (let i = start; i < buffer2.length; i++) {
+        if (buffer2[i] === 0) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function isFieldName(line, length, field) {
+      if (length !== field.length) {
+        return false;
+      }
+      for (let i = 0; i < length; i++) {
+        if (line[i] !== field[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function createMaxEventSizeExceededError() {
+      const error2 = new Error("EventSource message size exceeded");
+      error2.aborted = false;
+      return error2;
+    }
     var EventSourceStream = class extends Transform {
       /**
        * @type {eventSourceSettings}
@@ -18191,10 +18373,20 @@ var require_eventsource_stream = __commonJS({
        */
       eventEndCheck = false;
       /**
-       * @type {Buffer}
+       * @type {Buffer[]}
        */
-      buffer = null;
+      chunks = [];
+      chunkIndex = 0;
       pos = 0;
+      lineChunkIndex = 0;
+      linePos = 0;
+      lineLength = 0;
+      eventSize = 0;
+      eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 };
+      dataLineCount = 0;
+      maxEventSize;
+      maxDataLines;
+      maxBufferedChunks;
       event = {
         data: void 0,
         event: void 0,
@@ -18203,6 +18395,7 @@ var require_eventsource_stream = __commonJS({
       };
       /**
        * @param {object} options
+       * @param {number} [options.maxEventSize]
        * @param {eventSourceSettings} options.eventSourceSettings
        * @param {Function} [options.push]
        */
@@ -18210,6 +18403,10 @@ var require_eventsource_stream = __commonJS({
         options.readableObjectMode = true;
         super(options);
         this.state = options.eventSourceSettings || {};
+        this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+        const parserItemLimit = this.maxEventSize > 0 ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem))) : 0;
+        this.maxDataLines = parserItemLimit;
+        this.maxBufferedChunks = parserItemLimit;
         if (options.push) {
           this.push = options.push;
         }
@@ -18225,63 +18422,34 @@ var require_eventsource_stream = __commonJS({
           callback();
           return;
         }
-        if (this.buffer) {
-          this.buffer = Buffer.concat([this.buffer, chunk]);
-        } else {
-          this.buffer = chunk;
+        if (this.maxEventSize > 0 && this.chunks.length >= this.maxBufferedChunks && chunk[0] !== LF && chunk[0] !== CR) {
+          callback(createMaxEventSizeExceededError());
+          return;
         }
+        this.chunks.push(chunk);
         if (this.checkBOM) {
-          switch (this.buffer.length) {
-            case 1:
-              if (this.buffer[0] === BOM[0]) {
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              callback();
-              return;
-            case 2:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1]) {
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              break;
-            case 3:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1] && this.buffer[2] === BOM[2]) {
-                this.buffer = Buffer.alloc(0);
-                this.checkBOM = false;
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              break;
-            default:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1] && this.buffer[2] === BOM[2]) {
-                this.buffer = this.buffer.subarray(3);
-              }
-              this.checkBOM = false;
-              break;
+          if (this.handleBOM()) {
+            callback();
+            return;
           }
         }
-        while (this.pos < this.buffer.length) {
+        while (this.hasCurrentByte()) {
+          const byte = this.currentByte();
           if (this.eventEndCheck) {
             if (this.crlfCheck) {
-              if (this.buffer[this.pos] === LF) {
-                this.buffer = this.buffer.subarray(this.pos + 1);
-                this.pos = 0;
+              if (byte === LF) {
                 this.crlfCheck = false;
+                this.consumeCurrentByte();
                 continue;
               }
               this.crlfCheck = false;
             }
-            if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
-              if (this.buffer[this.pos] === CR) {
+            if (byte === LF || byte === CR) {
+              if (byte === CR) {
                 this.crlfCheck = true;
               }
-              this.buffer = this.buffer.subarray(this.pos + 1);
-              this.pos = 0;
-              if (this.event.data !== void 0 || this.event.event || this.event.id || this.event.retry) {
+              this.consumeCurrentByte();
+              if (this.hasPendingEvent()) {
                 this.processEvent(this.event);
               }
               this.clearEvent();
@@ -18290,23 +18458,36 @@ var require_eventsource_stream = __commonJS({
             this.eventEndCheck = false;
             continue;
           }
-          if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
-            if (this.buffer[this.pos] === CR) {
+          if (byte === LF || byte === CR) {
+            if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.buffer.subarray(0, this.pos), this.event);
-            this.buffer = this.buffer.subarray(this.pos + 1);
-            this.pos = 0;
+            try {
+              this.parseLine(this.readLine(), this.event);
+            } catch (error2) {
+              callback(error2);
+              return;
+            }
+            this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
           }
-          this.pos++;
+          if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+            callback(createMaxEventSizeExceededError());
+            return;
+          }
+          this.advanceCursor();
         }
         callback();
       }
+      _destroy(error2, callback) {
+        this.chunks.length = 0;
+        this.clearEvent();
+        super._destroy(error2, callback);
+      }
       /**
        * @param {Buffer} line
-       * @param {EventStreamEvent} event
+       * @param {EventSourceStreamEvent} event
        */
       parseLine(line, event) {
         if (line.length === 0) {
@@ -18316,44 +18497,60 @@ var require_eventsource_stream = __commonJS({
         if (colonPosition === 0) {
           return;
         }
-        let field = "";
-        let value = "";
+        let fieldLength = line.length;
+        let valueStart = line.length;
         if (colonPosition !== -1) {
-          field = line.subarray(0, colonPosition).toString("utf8");
-          let valueStart = colonPosition + 1;
+          fieldLength = colonPosition;
+          valueStart = colonPosition + 1;
           if (line[valueStart] === SPACE) {
             ++valueStart;
           }
-          value = line.subarray(valueStart).toString("utf8");
-        } else {
-          field = line.toString("utf8");
-          value = "";
         }
-        switch (field) {
-          case "data":
-            if (event[field] === void 0) {
-              event[field] = value;
-            } else {
-              event[field] += `
+        if (isFieldName(line, fieldLength, DATA)) {
+          if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+            throw createMaxEventSizeExceededError();
+          }
+          const valueBytes = line.length - valueStart;
+          const dataSize = this.eventFieldSizes.data + (event.data === void 0 ? 0 : 1) + valueBytes;
+          this.setEventFieldSize("data", dataSize);
+          const value = line.toString("utf8", valueStart);
+          if (event.data === void 0) {
+            event.data = value;
+          } else {
+            event.data += `
 ${value}`;
-            }
-            break;
-          case "retry":
-            if (isASCIINumber(value)) {
-              event[field] = value;
-            }
-            break;
-          case "id":
-            if (isValidLastEventId(value)) {
-              event[field] = value;
-            }
-            break;
-          case "event":
-            if (value.length > 0) {
-              event[field] = value;
-            }
-            break;
+          }
+          this.dataLineCount++;
+          return;
         }
+        if (isFieldName(line, fieldLength, RETRY)) {
+          if (isASCIINumberBytes(line, valueStart)) {
+            this.setEventFieldSize("retry", line.length - valueStart);
+            event.retry = line.toString("utf8", valueStart);
+          }
+          return;
+        }
+        if (isFieldName(line, fieldLength, ID)) {
+          if (isValidLastEventIdBytes(line, valueStart)) {
+            this.setEventFieldSize("id", line.length - valueStart);
+            event.id = line.toString("utf8", valueStart);
+          }
+          return;
+        }
+        if (isFieldName(line, fieldLength, EVENT)) {
+          if (valueStart < line.length) {
+            this.setEventFieldSize("event", line.length - valueStart);
+            event.event = line.toString("utf8", valueStart);
+          }
+        }
+      }
+      setEventFieldSize(field, size) {
+        const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+        if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+          throw createMaxEventSizeExceededError();
+        }
+        this.eventSize = eventSize;
+        this.eventFieldSizes[field] = size;
       }
       /**
        * @param {EventSourceStreamEvent} event
@@ -18377,12 +18574,128 @@ ${value}`;
         }
       }
       clearEvent() {
-        this.event = {
-          data: void 0,
-          event: void 0,
-          id: void 0,
-          retry: void 0
-        };
+        this.event.data = void 0;
+        this.event.event = void 0;
+        this.event.id = void 0;
+        this.event.retry = void 0;
+        this.eventSize = 0;
+        this.dataLineCount = 0;
+        this.eventFieldSizes.data = 0;
+        this.eventFieldSizes.event = 0;
+        this.eventFieldSizes.id = 0;
+        this.eventFieldSizes.retry = 0;
+      }
+      hasPendingEvent() {
+        return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
+      }
+      hasCurrentByte() {
+        return this.chunkIndex < this.chunks.length && this.pos < this.chunks[this.chunkIndex].length;
+      }
+      currentByte() {
+        return this.chunks[this.chunkIndex][this.pos];
+      }
+      consumeCurrentByte() {
+        this.advanceCursor();
+        this.syncLineStartToCursor();
+      }
+      advanceCursor() {
+        this.pos++;
+        while (this.chunkIndex < this.chunks.length && this.pos >= this.chunks[this.chunkIndex].length) {
+          this.chunkIndex++;
+          this.pos = 0;
+        }
+      }
+      syncLineStartToCursor() {
+        this.lineChunkIndex = this.chunkIndex;
+        this.linePos = this.pos;
+        this.lineLength = 0;
+        this.dropConsumedChunks();
+      }
+      dropConsumedChunks() {
+        if (this.lineChunkIndex > 0) {
+          const consumed = this.lineChunkIndex;
+          this.chunks.splice(0, consumed);
+          this.lineChunkIndex = 0;
+          this.chunkIndex -= consumed;
+        }
+        if (this.chunkIndex === this.chunks.length) {
+          this.chunks.length = 0;
+          this.chunkIndex = 0;
+          this.pos = 0;
+          this.lineChunkIndex = 0;
+          this.linePos = 0;
+        }
+      }
+      readLine() {
+        if (this.lineChunkIndex === this.chunkIndex) {
+          return this.chunks[this.chunkIndex].subarray(this.linePos, this.pos);
+        }
+        const chunks = [];
+        let length = 0;
+        for (let i = this.lineChunkIndex; i <= this.chunkIndex; i++) {
+          const chunk = this.chunks[i];
+          const start = i === this.lineChunkIndex ? this.linePos : 0;
+          const end = i === this.chunkIndex ? this.pos : chunk.length;
+          const slice = chunk.subarray(start, end);
+          length += slice.length;
+          chunks.push(slice);
+        }
+        return Buffer.concat(chunks, length);
+      }
+      peekBufferedByte(offset) {
+        let chunkIndex = this.lineChunkIndex;
+        let pos = this.linePos;
+        while (chunkIndex < this.chunks.length) {
+          const chunk = this.chunks[chunkIndex];
+          const remaining = chunk.length - pos;
+          if (offset < remaining) {
+            return chunk[pos + offset];
+          }
+          offset -= remaining;
+          chunkIndex++;
+          pos = 0;
+        }
+      }
+      discardLeadingBytes(count) {
+        while (count > 0 && this.lineChunkIndex < this.chunks.length) {
+          const chunk = this.chunks[this.lineChunkIndex];
+          const remaining = chunk.length - this.linePos;
+          if (count < remaining) {
+            this.linePos += count;
+            count = 0;
+          } else {
+            count -= remaining;
+            this.lineChunkIndex++;
+            this.linePos = 0;
+          }
+        }
+        this.chunkIndex = this.lineChunkIndex;
+        this.pos = this.linePos;
+        this.dropConsumedChunks();
+      }
+      handleBOM() {
+        const first = this.peekBufferedByte(0);
+        const second = this.peekBufferedByte(1);
+        const third = this.peekBufferedByte(2);
+        if (second === void 0) {
+          if (first === BOM[0]) {
+            return true;
+          }
+          this.checkBOM = false;
+          return true;
+        }
+        if (third === void 0) {
+          if (first === BOM[0] && second === BOM[1]) {
+            return true;
+          }
+          this.checkBOM = false;
+          return false;
+        }
+        if (first === BOM[0] && second === BOM[1] && third === BOM[2]) {
+          this.discardLeadingBytes(3);
+        }
+        this.checkBOM = false;
+        return !this.hasCurrentByte();
       }
     };
     module2.exports = {
@@ -18406,6 +18719,7 @@ var require_eventsource = __commonJS({
     var { delay } = require_util8();
     var { kEnumerableProperty } = require_util();
     var { environmentSettingsObject } = require_util2();
+    var { getGlobalDispatcher } = require_global2();
     var experimentalWarned = false;
     var defaultReconnectionTime = 3e3;
     var CONNECTING = 0;
@@ -18546,6 +18860,7 @@ var require_eventsource = __commonJS({
           this.#state.origin = response.urlList[response.urlList.length - 1].origin;
           const eventSourceStream = new EventSourceStream({
             eventSourceSettings: this.#state,
+            maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
             push: (event) => {
               this.dispatchEvent(createFastMessageEvent(
                 event.type,
@@ -18678,7 +18993,8 @@ var require_eventsource = __commonJS({
       {
         key: "dispatcher",
         // undici only
-        converter: webidl.converters.any
+        converter: webidl.converters.any,
+        defaultValue: () => getGlobalDispatcher()
       }
     ]);
     module2.exports = {
@@ -30436,8 +30752,14 @@ var require_follow_redirects = __commonJS({
     RedirectableRequest.prototype._sanitizeOptions = function(options) {
       if (!options.headers) {
         options.headers = {};
+      } else if (Array.isArray(options.headers)) {
+        var headerList = options.headers;
+        options.headers = {};
+        for (var i = 0; i < headerList.length; i += 2) {
+          options.headers[headerList[i]] = headerList[i + 1];
+        }
       }
-      if (!isArray2(options.sensitiveHeaders)) {
+      if (!Array.isArray(options.sensitiveHeaders)) {
         options.sensitiveHeaders = [];
       }
       if (options.host) {
@@ -30694,9 +31016,6 @@ var require_follow_redirects = __commonJS({
       var dot = subdomain.length - domain.length - 1;
       return dot > 0 && subdomain[dot] === "." && subdomain.endsWith(domain);
     }
-    function isArray2(value) {
-      return value instanceof Array;
-    }
     function isString2(value) {
       return typeof value === "string" || value instanceof String;
     }
@@ -30710,7 +31029,7 @@ var require_follow_redirects = __commonJS({
       return URL2 && value instanceof URL2;
     }
     function escapeRegex(regex2) {
-      return regex2.replace(/[\]\\/()*+?.$]/g, "\\$&");
+      return regex2.replace(/[[\]\\/()*+?.^$|]/g, "\\$&");
     }
     module2.exports = wrap({ http: http4, https: https2 });
     module2.exports.wrap = wrap;
@@ -30726,6 +31045,9 @@ var require_symbols6 = __commonJS({
       kDestroy: /* @__PURE__ */ Symbol("destroy"),
       kDispatch: /* @__PURE__ */ Symbol("dispatch"),
       kUrl: /* @__PURE__ */ Symbol("url"),
+      kRequestOrigin: /* @__PURE__ */ Symbol("request origin"),
+      kRedirectCacheControl: /* @__PURE__ */ Symbol("redirect cache control"),
+      kOriginless: /* @__PURE__ */ Symbol("originless"),
       kWriting: /* @__PURE__ */ Symbol("writing"),
       kResuming: /* @__PURE__ */ Symbol("resuming"),
       kQueue: /* @__PURE__ */ Symbol("queue"),
@@ -30791,6 +31113,7 @@ var require_symbols6 = __commonJS({
       kRemoteSettings: /* @__PURE__ */ Symbol("http2session remote settings"),
       kHTTP2Stream: /* @__PURE__ */ Symbol("http2session client stream"),
       kPingInterval: /* @__PURE__ */ Symbol("ping interval"),
+      kUseMilo: /* @__PURE__ */ Symbol("use milo"),
       kNoProxyAgent: /* @__PURE__ */ Symbol("no proxy agent"),
       kHttpProxyAgent: /* @__PURE__ */ Symbol("http proxy agent"),
       kHttpsProxyAgent: /* @__PURE__ */ Symbol("https proxy agent"),
@@ -31287,6 +31610,19 @@ var require_errors2 = __commonJS({
         return true;
       }
     };
+    var kWebAssemblyNotSupportedError = /* @__PURE__ */ Symbol.for("undici.error.ERR_WEBASSEMBLY_NOT_SUPPORTED");
+    var WebAssemblyNotSupportedError = class extends Error {
+      constructor(message) {
+        super(message || "WebAssembly is not supported in this environment, but is required for HTTP/1 parsing");
+        this.code = "ERR_WEBASSEMBLY_NOT_SUPPORTED";
+      }
+      static [Symbol.hasInstance](instance) {
+        return instance && instance[kWebAssemblyNotSupportedError] === true;
+      }
+      get [kWebAssemblyNotSupportedError]() {
+        return true;
+      }
+    };
     var kHTTPParserError = /* @__PURE__ */ Symbol.for("undici.error.UND_ERR_HTTP_PARSER");
     var HTTPParserError = class extends Error {
       constructor(message, code, data) {
@@ -31337,13 +31673,14 @@ var require_errors2 = __commonJS({
     };
     var kResponseError = /* @__PURE__ */ Symbol.for("undici.error.UND_ERR_RESPONSE");
     var ResponseError = class extends UndiciError {
-      constructor(message, code, { headers, body }) {
+      constructor(message, code, { headers, body, bodyTruncated = false }) {
         super(message);
         this.name = "ResponseError";
         this.message = message || "Response error";
         this.code = "UND_ERR_RESPONSE";
         this.statusCode = code;
         this.body = body;
+        this.bodyTruncated = bodyTruncated;
         this.headers = headers;
       }
       static [Symbol.hasInstance](instance) {
@@ -31382,6 +31719,21 @@ var require_errors2 = __commonJS({
         return instance && instance[kProxyConnectionError] === true;
       }
       get [kProxyConnectionError]() {
+        return true;
+      }
+    };
+    var kMaxRedirectsError = /* @__PURE__ */ Symbol.for("undici.error.UND_ERR_REDIRECT_MAX");
+    var MaxRedirectsError = class extends UndiciError {
+      constructor(message) {
+        super(message);
+        this.name = "MaxRedirectsError";
+        this.message = message || "max redirects";
+        this.code = "UND_ERR_REDIRECT_MAX";
+      }
+      static [Symbol.hasInstance](instance) {
+        return instance && instance[kMaxRedirectsError] === true;
+      }
+      get [kMaxRedirectsError]() {
         return true;
       }
     };
@@ -31425,6 +31777,7 @@ var require_errors2 = __commonJS({
     };
     module2.exports = {
       AbortError,
+      WebAssemblyNotSupportedError,
       HTTPParserError,
       UndiciError,
       HeadersTimeoutError,
@@ -31448,6 +31801,7 @@ var require_errors2 = __commonJS({
       SecureProxyConnectionError,
       ProxyConnectionError,
       MaxOriginsReachedError,
+      MaxRedirectsError,
       Socks5ProxyError,
       MessageSizeExceededError
     };
@@ -31565,9 +31919,13 @@ var require_constants6 = __commonJS({
       const lowerCasedKey = key.toLowerCase();
       headerNameLowerCasedRecord[key] = headerNameLowerCasedRecord[lowerCasedKey] = lowerCasedKey;
     }
+    var defaultWebSocketMaxFragments = 131072;
+    var defaultWebSocketMaxPayloadSize = 128 * 1024 * 1024;
     module2.exports = {
       wellknownHeaderNames,
-      headerNameLowerCasedRecord
+      headerNameLowerCasedRecord,
+      defaultWebSocketMaxFragments,
+      defaultWebSocketMaxPayloadSize
     };
   }
 });
@@ -31917,7 +32275,7 @@ var require_util9 = __commonJS({
         stream5[kDestroyed] = true;
       }
     }
-    var KEEPALIVE_TIMEOUT_EXPR = /timeout=(\d+)/;
+    var KEEPALIVE_TIMEOUT_EXPR = /(?:^|,)[\t ]*timeout=(\d+)/i;
     function parseKeepAliveTimeout(val) {
       const m2 = val.match(KEEPALIVE_TIMEOUT_EXPR);
       return m2 ? parseInt(m2[1], 10) * 1e3 : null;
@@ -31927,6 +32285,18 @@ var require_util9 = __commonJS({
     }
     function bufferToLowerCasedHeaderName(value) {
       return tree.lookup(value) ?? value.toString("latin1").toLowerCase();
+    }
+    function setHeader(obj, key, value) {
+      if (key === "__proto__") {
+        Object.defineProperty(obj, key, {
+          value,
+          enumerable: true,
+          configurable: true,
+          writable: true
+        });
+      } else {
+        obj[key] = value;
+      }
     }
     function parseHeaders(headers, obj) {
       if (obj === void 0) obj = {};
@@ -32059,37 +32429,6 @@ var require_util9 = __commonJS({
         bytesWritten: socket.bytesWritten,
         bytesRead: socket.bytesRead
       };
-    }
-    function ReadableStreamFrom(iterable) {
-      let iterator2;
-      return new ReadableStream(
-        {
-          start() {
-            iterator2 = iterable[Symbol.asyncIterator]();
-          },
-          pull(controller) {
-            return iterator2.next().then(({ done, value }) => {
-              if (done) {
-                return queueMicrotask(() => {
-                  controller.close();
-                  controller.byobRequest?.respond(0);
-                });
-              } else {
-                const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
-                if (buf.byteLength) {
-                  return controller.enqueue(new Uint8Array(buf));
-                } else {
-                  return this.pull(controller);
-                }
-              }
-            });
-          },
-          cancel() {
-            return iterator2.return();
-          },
-          type: "bytes"
-        }
-      );
     }
     function isFormDataLike(object) {
       return object && typeof object === "object" && typeof object.append === "function" && typeof object.delete === "function" && typeof object.get === "function" && typeof object.getAll === "function" && typeof object.has === "function" && typeof object.set === "function" && object[Symbol.toStringTag] === "FormData";
@@ -32547,11 +32886,11 @@ var require_util9 = __commonJS({
       toRawHeaders,
       encodeRawHeaders,
       parseHeaders,
+      setHeader,
       parseKeepAliveTimeout,
       destroy,
       bodyLength,
       deepClone,
-      ReadableStreamFrom,
       isBuffer: isBuffer3,
       assertRequestHandler,
       getSocketInfo,
@@ -32826,6 +33165,2282 @@ var require_diagnostics2 = __commonJS({
   }
 });
 
+// node_modules/undici/lib/web/fetch/constants.js
+var require_constants7 = __commonJS({
+  "node_modules/undici/lib/web/fetch/constants.js"(exports2, module2) {
+    "use strict";
+    var corsSafeListedMethods = (
+      /** @type {const} */
+      ["GET", "HEAD", "POST"]
+    );
+    var corsSafeListedMethodsSet = new Set(corsSafeListedMethods);
+    var nullBodyStatus = (
+      /** @type {const} */
+      [101, 204, 205, 304]
+    );
+    var redirectStatus = (
+      /** @type {const} */
+      [301, 302, 303, 307, 308]
+    );
+    var redirectStatusSet = new Set(redirectStatus);
+    var badPorts = (
+      /** @type {const} */
+      [
+        "1",
+        "7",
+        "9",
+        "11",
+        "13",
+        "15",
+        "17",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "25",
+        "37",
+        "42",
+        "43",
+        "53",
+        "69",
+        "77",
+        "79",
+        "87",
+        "95",
+        "101",
+        "102",
+        "103",
+        "104",
+        "109",
+        "110",
+        "111",
+        "113",
+        "115",
+        "117",
+        "119",
+        "123",
+        "135",
+        "137",
+        "139",
+        "143",
+        "161",
+        "179",
+        "389",
+        "427",
+        "465",
+        "512",
+        "513",
+        "514",
+        "515",
+        "526",
+        "530",
+        "531",
+        "532",
+        "540",
+        "548",
+        "554",
+        "556",
+        "563",
+        "587",
+        "601",
+        "636",
+        "989",
+        "990",
+        "993",
+        "995",
+        "1719",
+        "1720",
+        "1723",
+        "2049",
+        "3659",
+        "4045",
+        "4190",
+        "5060",
+        "5061",
+        "6000",
+        "6566",
+        "6665",
+        "6666",
+        "6667",
+        "6668",
+        "6669",
+        "6679",
+        "6697",
+        "10080"
+      ]
+    );
+    var badPortsSet = new Set(badPorts);
+    var referrerPolicyTokens = (
+      /** @type {const} */
+      [
+        "no-referrer",
+        "no-referrer-when-downgrade",
+        "same-origin",
+        "origin",
+        "strict-origin",
+        "origin-when-cross-origin",
+        "strict-origin-when-cross-origin",
+        "unsafe-url"
+      ]
+    );
+    var referrerPolicy = (
+      /** @type {const} */
+      [
+        "",
+        ...referrerPolicyTokens
+      ]
+    );
+    var referrerPolicyTokensSet = new Set(referrerPolicyTokens);
+    var requestRedirect = (
+      /** @type {const} */
+      ["follow", "manual", "error"]
+    );
+    var safeMethods = (
+      /** @type {const} */
+      ["GET", "HEAD", "OPTIONS", "TRACE", "QUERY"]
+    );
+    var safeMethodsSet = new Set(safeMethods);
+    var requestMode = (
+      /** @type {const} */
+      ["navigate", "same-origin", "no-cors", "cors"]
+    );
+    var requestCredentials = (
+      /** @type {const} */
+      ["omit", "same-origin", "include"]
+    );
+    var requestCache = (
+      /** @type {const} */
+      [
+        "default",
+        "no-store",
+        "reload",
+        "no-cache",
+        "force-cache",
+        "only-if-cached"
+      ]
+    );
+    var requestBodyHeader = (
+      /** @type {const} */
+      [
+        "content-encoding",
+        "content-language",
+        "content-location",
+        "content-type",
+        // See https://github.com/nodejs/undici/issues/2021
+        // 'Content-Length' is a forbidden header name, which is typically
+        // removed in the Headers implementation. However, undici doesn't
+        // filter out headers, so we add it here.
+        "content-length"
+      ]
+    );
+    var requestDuplex = (
+      /** @type {const} */
+      [
+        "half"
+      ]
+    );
+    var forbiddenMethods = (
+      /** @type {const} */
+      ["CONNECT", "TRACE", "TRACK"]
+    );
+    var forbiddenMethodsSet = new Set(forbiddenMethods);
+    var subresource = (
+      /** @type {const} */
+      [
+        "audio",
+        "audioworklet",
+        "font",
+        "image",
+        "manifest",
+        "paintworklet",
+        "script",
+        "style",
+        "track",
+        "video",
+        "xslt",
+        ""
+      ]
+    );
+    var subresourceSet = new Set(subresource);
+    module2.exports = {
+      subresource,
+      forbiddenMethods,
+      requestBodyHeader,
+      referrerPolicy,
+      requestRedirect,
+      requestMode,
+      requestCredentials,
+      requestCache,
+      redirectStatus,
+      corsSafeListedMethods,
+      nullBodyStatus,
+      safeMethods,
+      badPorts,
+      requestDuplex,
+      subresourceSet,
+      badPortsSet,
+      redirectStatusSet,
+      corsSafeListedMethodsSet,
+      safeMethodsSet,
+      forbiddenMethodsSet,
+      referrerPolicyTokens: referrerPolicyTokensSet
+    };
+  }
+});
+
+// node_modules/undici/lib/web/fetch/global.js
+var require_global3 = __commonJS({
+  "node_modules/undici/lib/web/fetch/global.js"(exports2, module2) {
+    "use strict";
+    var globalOrigin = /* @__PURE__ */ Symbol.for("undici.globalOrigin.1");
+    function getGlobalOrigin() {
+      return globalThis[globalOrigin];
+    }
+    function setGlobalOrigin(newOrigin) {
+      if (newOrigin === void 0) {
+        Object.defineProperty(globalThis, globalOrigin, {
+          value: void 0,
+          writable: true,
+          enumerable: false,
+          configurable: false
+        });
+        return;
+      }
+      const parsedURL = new URL(newOrigin);
+      if (parsedURL.protocol !== "http:" && parsedURL.protocol !== "https:") {
+        throw new TypeError(`Only http & https urls are allowed, received ${parsedURL.protocol}`);
+      }
+      Object.defineProperty(globalThis, globalOrigin, {
+        value: parsedURL,
+        writable: true,
+        enumerable: false,
+        configurable: false
+      });
+    }
+    module2.exports = {
+      getGlobalOrigin,
+      setGlobalOrigin
+    };
+  }
+});
+
+// node_modules/undici/lib/encoding/index.js
+var require_encoding2 = __commonJS({
+  "node_modules/undici/lib/encoding/index.js"(exports2, module2) {
+    "use strict";
+    var textDecoder = new TextDecoder();
+    function utf8DecodeBytes(buffer) {
+      if (buffer.length === 0) {
+        return "";
+      }
+      if (buffer[0] === 239 && buffer[1] === 187 && buffer[2] === 191) {
+        buffer = buffer.subarray(3);
+      }
+      const output = textDecoder.decode(buffer);
+      return output;
+    }
+    module2.exports = {
+      utf8DecodeBytes
+    };
+  }
+});
+
+// node_modules/undici/lib/web/infra/index.js
+var require_infra = __commonJS({
+  "node_modules/undici/lib/web/infra/index.js"(exports2, module2) {
+    "use strict";
+    var assert = require("node:assert");
+    var { utf8DecodeBytes } = require_encoding2();
+    function collectASequenceOfCodePoints(condition, input, position) {
+      let result = "";
+      while (position.position < input.length && condition(input[position.position])) {
+        result += input[position.position];
+        position.position++;
+      }
+      return result;
+    }
+    function collectASequenceOfCodePointsFast(char, input, position) {
+      const idx = input.indexOf(char, position.position);
+      const start = position.position;
+      if (idx === -1) {
+        position.position = input.length;
+        return input.slice(start);
+      }
+      position.position = idx;
+      return input.slice(start, position.position);
+    }
+    var ASCII_WHITESPACE_REPLACE_REGEX = /[\u0009\u000A\u000C\u000D\u0020]/g;
+    function forgivingBase64(data) {
+      data = data.replace(ASCII_WHITESPACE_REPLACE_REGEX, "");
+      let dataLength = data.length;
+      if (dataLength % 4 === 0) {
+        if (data.charCodeAt(dataLength - 1) === 61) {
+          --dataLength;
+          if (data.charCodeAt(dataLength - 1) === 61) {
+            --dataLength;
+          }
+        }
+      }
+      if (dataLength % 4 === 1) {
+        return "failure";
+      }
+      if (/[^+/0-9A-Za-z]/.test(data.length === dataLength ? data : data.substring(0, dataLength))) {
+        return "failure";
+      }
+      const buffer = Buffer.from(data, "base64");
+      return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    }
+    function isASCIIWhitespace(char) {
+      return char === 9 || // \t
+      char === 10 || // \n
+      char === 12 || // \f
+      char === 13 || // \r
+      char === 32;
+    }
+    function isomorphicDecode(input) {
+      const length = input.length;
+      if ((2 << 15) - 1 > length) {
+        return String.fromCharCode.apply(null, input);
+      }
+      let result = "";
+      let i = 0;
+      let addition = (2 << 15) - 1;
+      while (i < length) {
+        if (i + addition > length) {
+          addition = length - i;
+        }
+        result += String.fromCharCode.apply(null, input.subarray(i, i += addition));
+      }
+      return result;
+    }
+    var invalidIsomorphicEncodeValueRegex = /[^\x00-\xFF]/;
+    function isomorphicEncode(input) {
+      assert(!invalidIsomorphicEncodeValueRegex.test(input));
+      return input;
+    }
+    var nonASCIIRegex = /[^\x00-\x7F]/;
+    function asciiLowercase(str) {
+      return nonASCIIRegex.test(str) ? str.replace(/[A-Z]+/g, (upper) => upper.toLowerCase()) : str.toLowerCase();
+    }
+    function parseJSONFromBytes(bytes) {
+      return JSON.parse(utf8DecodeBytes(bytes));
+    }
+    function removeASCIIWhitespace(str, leading = true, trailing = true) {
+      return removeChars(str, leading, trailing, isASCIIWhitespace);
+    }
+    function removeChars(str, leading, trailing, predicate) {
+      let lead = 0;
+      let trail = str.length - 1;
+      if (leading) {
+        while (lead < str.length && predicate(str.charCodeAt(lead))) lead++;
+      }
+      if (trailing) {
+        while (trail >= lead && predicate(str.charCodeAt(trail))) trail--;
+      }
+      return lead === 0 && trail === str.length - 1 ? str : str.slice(lead, trail + 1);
+    }
+    function serializeJavascriptValueToJSONString(value) {
+      const result = JSON.stringify(value);
+      if (result === void 0) {
+        throw new TypeError("Value is not JSON serializable");
+      }
+      assert(typeof result === "string");
+      return result;
+    }
+    module2.exports = {
+      asciiLowercase,
+      collectASequenceOfCodePoints,
+      collectASequenceOfCodePointsFast,
+      forgivingBase64,
+      isASCIIWhitespace,
+      isomorphicDecode,
+      isomorphicEncode,
+      parseJSONFromBytes,
+      removeASCIIWhitespace,
+      removeChars,
+      serializeJavascriptValueToJSONString
+    };
+  }
+});
+
+// node_modules/undici/lib/web/fetch/data-url.js
+var require_data_url2 = __commonJS({
+  "node_modules/undici/lib/web/fetch/data-url.js"(exports2, module2) {
+    "use strict";
+    var assert = require("node:assert");
+    var { asciiLowercase, forgivingBase64, collectASequenceOfCodePoints, collectASequenceOfCodePointsFast, isomorphicDecode, removeASCIIWhitespace, removeChars } = require_infra();
+    var encoder = new TextEncoder();
+    var HTTP_TOKEN_CODEPOINTS = /^[-!#$%&'*+.^_`|~A-Za-z0-9]+$/u;
+    var HTTP_WHITESPACE_REGEX = /[\u000A\u000D\u0009\u0020]/u;
+    var HTTP_QUOTED_STRING_TOKENS = /^[\u0009\u0020-\u007E\u0080-\u00FF]+$/u;
+    function dataURLProcessor(dataURL) {
+      assert(dataURL.protocol === "data:");
+      let input = URLSerializer(dataURL, true);
+      input = input.slice(5);
+      const position = { position: 0 };
+      let mimeType = collectASequenceOfCodePointsFast(
+        ",",
+        input,
+        position
+      );
+      const mimeTypeLength = mimeType.length;
+      mimeType = removeASCIIWhitespace(mimeType, true, true);
+      if (position.position >= input.length) {
+        return "failure";
+      }
+      position.position++;
+      const encodedBody = input.slice(mimeTypeLength + 1);
+      let body = stringPercentDecode(encodedBody);
+      if (/;\u0020*[Bb][Aa][Ss][Ee]64$/u.test(mimeType)) {
+        const stringBody = isomorphicDecode(body);
+        body = forgivingBase64(stringBody);
+        if (body === "failure") {
+          return "failure";
+        }
+        mimeType = mimeType.slice(0, -6);
+        mimeType = mimeType.replace(/(\u0020+)$/u, "");
+        mimeType = mimeType.slice(0, -1);
+      }
+      if (mimeType.startsWith(";")) {
+        mimeType = "text/plain" + mimeType;
+      }
+      let mimeTypeRecord = parseMIMEType(mimeType);
+      if (mimeTypeRecord === "failure") {
+        mimeTypeRecord = parseMIMEType("text/plain;charset=US-ASCII");
+      }
+      return { mimeType: mimeTypeRecord, body };
+    }
+    function URLSerializer(url2, excludeFragment = false) {
+      if (!excludeFragment) {
+        return url2.href;
+      }
+      const href = url2.href;
+      const hashLength = url2.hash.length;
+      const serialized = hashLength === 0 ? href : href.substring(0, href.length - hashLength);
+      if (!hashLength && href.endsWith("#")) {
+        return serialized.slice(0, -1);
+      }
+      return serialized;
+    }
+    function stringPercentDecode(input) {
+      const bytes = encoder.encode(input);
+      return percentDecode(bytes);
+    }
+    function isHexCharByte(byte) {
+      return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
+    }
+    function hexByteToNumber(byte) {
+      return (
+        // 0-9
+        byte >= 48 && byte <= 57 ? byte - 48 : (byte & 223) - 55
+      );
+    }
+    function percentDecode(input) {
+      const length = input.length;
+      const output = new Uint8Array(length);
+      let j3 = 0;
+      let i = 0;
+      while (i < length) {
+        const byte = input[i];
+        if (byte !== 37) {
+          output[j3++] = byte;
+        } else if (byte === 37 && !(isHexCharByte(input[i + 1]) && isHexCharByte(input[i + 2]))) {
+          output[j3++] = 37;
+        } else {
+          output[j3++] = hexByteToNumber(input[i + 1]) << 4 | hexByteToNumber(input[i + 2]);
+          i += 2;
+        }
+        ++i;
+      }
+      return length === j3 ? output : output.subarray(0, j3);
+    }
+    function parseMIMEType(input) {
+      input = removeHTTPWhitespace(input, true, true);
+      const position = { position: 0 };
+      const type = collectASequenceOfCodePointsFast(
+        "/",
+        input,
+        position
+      );
+      if (type.length === 0 || !HTTP_TOKEN_CODEPOINTS.test(type)) {
+        return "failure";
+      }
+      if (position.position >= input.length) {
+        return "failure";
+      }
+      position.position++;
+      let subtype = collectASequenceOfCodePointsFast(
+        ";",
+        input,
+        position
+      );
+      subtype = removeHTTPWhitespace(subtype, false, true);
+      if (subtype.length === 0 || !HTTP_TOKEN_CODEPOINTS.test(subtype)) {
+        return "failure";
+      }
+      const typeLowercase = asciiLowercase(type);
+      const subtypeLowercase = asciiLowercase(subtype);
+      const mimeType = {
+        type: typeLowercase,
+        subtype: subtypeLowercase,
+        /** @type {Map<string, string>} */
+        parameters: /* @__PURE__ */ new Map(),
+        // https://mimesniff.spec.whatwg.org/#mime-type-essence
+        essence: `${typeLowercase}/${subtypeLowercase}`
+      };
+      while (position.position < input.length) {
+        position.position++;
+        collectASequenceOfCodePoints(
+          // https://fetch.spec.whatwg.org/#http-whitespace
+          (char) => HTTP_WHITESPACE_REGEX.test(char),
+          input,
+          position
+        );
+        let parameterName = collectASequenceOfCodePoints(
+          (char) => char !== ";" && char !== "=",
+          input,
+          position
+        );
+        parameterName = asciiLowercase(parameterName);
+        if (position.position < input.length) {
+          if (input[position.position] === ";") {
+            continue;
+          }
+          position.position++;
+        }
+        if (position.position >= input.length) {
+          break;
+        }
+        let parameterValue = null;
+        if (input[position.position] === '"') {
+          parameterValue = collectAnHTTPQuotedString(input, position, true);
+          collectASequenceOfCodePointsFast(
+            ";",
+            input,
+            position
+          );
+        } else {
+          parameterValue = collectASequenceOfCodePointsFast(
+            ";",
+            input,
+            position
+          );
+          parameterValue = removeHTTPWhitespace(parameterValue, false, true);
+          if (parameterValue.length === 0) {
+            continue;
+          }
+        }
+        if (parameterName.length !== 0 && HTTP_TOKEN_CODEPOINTS.test(parameterName) && (parameterValue.length === 0 || HTTP_QUOTED_STRING_TOKENS.test(parameterValue)) && !mimeType.parameters.has(parameterName)) {
+          mimeType.parameters.set(parameterName, parameterValue);
+        }
+      }
+      return mimeType;
+    }
+    function collectAnHTTPQuotedString(input, position, extractValue = false) {
+      const positionStart = position.position;
+      let value = "";
+      assert(input[position.position] === '"');
+      position.position++;
+      while (true) {
+        value += collectASequenceOfCodePoints(
+          (char) => char !== '"' && char !== "\\",
+          input,
+          position
+        );
+        if (position.position >= input.length) {
+          break;
+        }
+        const quoteOrBackslash = input[position.position];
+        position.position++;
+        if (quoteOrBackslash === "\\") {
+          if (position.position >= input.length) {
+            value += "\\";
+            break;
+          }
+          value += input[position.position];
+          position.position++;
+        } else {
+          assert(quoteOrBackslash === '"');
+          break;
+        }
+      }
+      if (extractValue) {
+        return value;
+      }
+      return input.slice(positionStart, position.position);
+    }
+    function serializeAMimeType(mimeType) {
+      assert(mimeType !== "failure");
+      const { parameters, essence } = mimeType;
+      let serialization = essence;
+      for (let [name, value] of parameters.entries()) {
+        serialization += ";";
+        serialization += name;
+        serialization += "=";
+        if (!HTTP_TOKEN_CODEPOINTS.test(value)) {
+          value = value.replace(/[\\"]/ug, "\\$&");
+          value = '"' + value;
+          value += '"';
+        }
+        serialization += value;
+      }
+      return serialization;
+    }
+    function isHTTPWhiteSpace(char) {
+      return char === 13 || char === 10 || char === 9 || char === 32;
+    }
+    function removeHTTPWhitespace(str, leading = true, trailing = true) {
+      return removeChars(str, leading, trailing, isHTTPWhiteSpace);
+    }
+    function minimizeSupportedMimeType(mimeType) {
+      switch (mimeType.essence) {
+        case "application/ecmascript":
+        case "application/javascript":
+        case "application/x-ecmascript":
+        case "application/x-javascript":
+        case "text/ecmascript":
+        case "text/javascript":
+        case "text/javascript1.0":
+        case "text/javascript1.1":
+        case "text/javascript1.2":
+        case "text/javascript1.3":
+        case "text/javascript1.4":
+        case "text/javascript1.5":
+        case "text/jscript":
+        case "text/livescript":
+        case "text/x-ecmascript":
+        case "text/x-javascript":
+          return "text/javascript";
+        case "application/json":
+        case "text/json":
+          return "application/json";
+        case "image/svg+xml":
+          return "image/svg+xml";
+        case "text/xml":
+        case "application/xml":
+          return "application/xml";
+      }
+      if (mimeType.subtype.endsWith("+json")) {
+        return "application/json";
+      }
+      if (mimeType.subtype.endsWith("+xml")) {
+        return "application/xml";
+      }
+      return "";
+    }
+    module2.exports = {
+      dataURLProcessor,
+      URLSerializer,
+      stringPercentDecode,
+      parseMIMEType,
+      collectAnHTTPQuotedString,
+      serializeAMimeType,
+      removeHTTPWhitespace,
+      minimizeSupportedMimeType,
+      HTTP_TOKEN_CODEPOINTS
+    };
+  }
+});
+
+// node_modules/undici/lib/web/webidl/index.js
+var require_webidl2 = __commonJS({
+  "node_modules/undici/lib/web/webidl/index.js"(exports2, module2) {
+    "use strict";
+    var assert = require("node:assert");
+    var { types: types3, inspect } = require("node:util");
+    var { markAsUncloneable } = require("node:worker_threads");
+    var UNDEFINED = 1;
+    var BOOLEAN = 2;
+    var STRING = 3;
+    var SYMBOL = 4;
+    var NUMBER = 5;
+    var BIGINT = 6;
+    var NULL = 7;
+    var OBJECT = 8;
+    var FunctionPrototypeSymbolHasInstance = Function.call.bind(Function.prototype[Symbol.hasInstance]);
+    var webidl = {
+      converters: {},
+      util: {},
+      errors: {},
+      is: {}
+    };
+    webidl.errors.exception = function(message) {
+      return new TypeError(`${message.header}: ${message.message}`);
+    };
+    webidl.errors.conversionFailed = function(opts) {
+      const plural = opts.types.length === 1 ? "" : " one of";
+      const message = `${opts.argument} could not be converted to${plural}: ${opts.types.join(", ")}.`;
+      return webidl.errors.exception({
+        header: opts.prefix,
+        message
+      });
+    };
+    webidl.errors.invalidArgument = function(context) {
+      return webidl.errors.exception({
+        header: context.prefix,
+        message: `"${context.value}" is an invalid ${context.type}.`
+      });
+    };
+    webidl.brandCheck = function(V3, is2) {
+      if (!is2(V3)) {
+        const err = new TypeError("Illegal invocation");
+        err.code = "ERR_INVALID_THIS";
+        throw err;
+      }
+    };
+    webidl.argumentLengthCheck = function({ length }, min, ctx) {
+      if (length < min) {
+        throw webidl.errors.exception({
+          message: `${min} argument${min !== 1 ? "s" : ""} required, but${length ? " only" : ""} ${length} found.`,
+          header: ctx
+        });
+      }
+    };
+    webidl.illegalConstructor = function() {
+      throw webidl.errors.exception({
+        header: "TypeError",
+        message: "Illegal constructor"
+      });
+    };
+    webidl.util.MakeTypeAssertion = function(I3) {
+      return (O3) => FunctionPrototypeSymbolHasInstance(I3, O3);
+    };
+    webidl.util.Type = function(V3) {
+      switch (typeof V3) {
+        case "undefined":
+          return UNDEFINED;
+        case "boolean":
+          return BOOLEAN;
+        case "string":
+          return STRING;
+        case "symbol":
+          return SYMBOL;
+        case "number":
+          return NUMBER;
+        case "bigint":
+          return BIGINT;
+        case "function":
+        case "object": {
+          if (V3 === null) {
+            return NULL;
+          }
+          return OBJECT;
+        }
+      }
+    };
+    webidl.util.Types = {
+      UNDEFINED,
+      BOOLEAN,
+      STRING,
+      SYMBOL,
+      NUMBER,
+      BIGINT,
+      NULL,
+      OBJECT
+    };
+    webidl.util.TypeValueToString = function(o) {
+      switch (webidl.util.Type(o)) {
+        case UNDEFINED:
+          return "Undefined";
+        case BOOLEAN:
+          return "Boolean";
+        case STRING:
+          return "String";
+        case SYMBOL:
+          return "Symbol";
+        case NUMBER:
+          return "Number";
+        case BIGINT:
+          return "BigInt";
+        case NULL:
+          return "Null";
+        case OBJECT:
+          return "Object";
+      }
+    };
+    webidl.util.markAsUncloneable = markAsUncloneable;
+    webidl.util.ConvertToInt = function(V3, bitLength, signedness, flags) {
+      let upperBound;
+      let lowerBound;
+      if (bitLength === 64) {
+        upperBound = Math.pow(2, 53) - 1;
+        if (signedness === "unsigned") {
+          lowerBound = 0;
+        } else {
+          lowerBound = Math.pow(-2, 53) + 1;
+        }
+      } else if (signedness === "unsigned") {
+        lowerBound = 0;
+        upperBound = Math.pow(2, bitLength) - 1;
+      } else {
+        lowerBound = -Math.pow(2, bitLength - 1);
+        upperBound = Math.pow(2, bitLength - 1) - 1;
+      }
+      let x3 = Number(V3);
+      if (x3 === 0) {
+        x3 = 0;
+      }
+      if (webidl.util.HasFlag(flags, webidl.attributes.EnforceRange)) {
+        if (Number.isNaN(x3) || x3 === Number.POSITIVE_INFINITY || x3 === Number.NEGATIVE_INFINITY) {
+          throw webidl.errors.exception({
+            header: "Integer conversion",
+            message: `Could not convert ${webidl.util.Stringify(V3)} to an integer.`
+          });
+        }
+        x3 = webidl.util.IntegerPart(x3);
+        if (x3 < lowerBound || x3 > upperBound) {
+          throw webidl.errors.exception({
+            header: "Integer conversion",
+            message: `Value must be between ${lowerBound}-${upperBound}, got ${x3}.`
+          });
+        }
+        return x3;
+      }
+      if (!Number.isNaN(x3) && webidl.util.HasFlag(flags, webidl.attributes.Clamp)) {
+        x3 = Math.min(Math.max(x3, lowerBound), upperBound);
+        if (Math.floor(x3) % 2 === 0) {
+          x3 = Math.floor(x3);
+        } else {
+          x3 = Math.ceil(x3);
+        }
+        return x3;
+      }
+      if (Number.isNaN(x3) || x3 === 0 && Object.is(0, x3) || x3 === Number.POSITIVE_INFINITY || x3 === Number.NEGATIVE_INFINITY) {
+        return 0;
+      }
+      x3 = webidl.util.IntegerPart(x3);
+      x3 = x3 % Math.pow(2, bitLength);
+      if (signedness === "signed" && x3 >= Math.pow(2, bitLength - 1)) {
+        return x3 - Math.pow(2, bitLength);
+      }
+      return x3;
+    };
+    webidl.util.IntegerPart = function(n7) {
+      const r = Math.floor(Math.abs(n7));
+      if (n7 < 0) {
+        return -1 * r;
+      }
+      return r;
+    };
+    webidl.util.Stringify = function(V3) {
+      const type = webidl.util.Type(V3);
+      switch (type) {
+        case SYMBOL:
+          return `Symbol(${V3.description})`;
+        case OBJECT:
+          return inspect(V3);
+        case STRING:
+          return `"${V3}"`;
+        case BIGINT:
+          return `${V3}n`;
+        default:
+          return `${V3}`;
+      }
+    };
+    webidl.util.IsResizableArrayBuffer = function(V3) {
+      if (types3.isArrayBuffer(V3)) {
+        return V3.resizable;
+      }
+      if (types3.isSharedArrayBuffer(V3)) {
+        return V3.growable;
+      }
+      throw webidl.errors.exception({
+        header: "IsResizableArrayBuffer",
+        message: `"${webidl.util.Stringify(V3)}" is not an array buffer.`
+      });
+    };
+    webidl.util.HasFlag = function(flags, attributes) {
+      return typeof flags === "number" && (flags & attributes) === attributes;
+    };
+    webidl.sequenceConverter = function(converter) {
+      return (V3, prefix, argument, Iterable) => {
+        if (webidl.util.Type(V3) !== OBJECT) {
+          throw webidl.errors.exception({
+            header: prefix,
+            message: `${argument} (${webidl.util.Stringify(V3)}) is not iterable.`
+          });
+        }
+        const method = typeof Iterable === "function" ? Iterable() : V3?.[Symbol.iterator]?.();
+        const seq = [];
+        let index = 0;
+        if (method === void 0 || typeof method.next !== "function") {
+          throw webidl.errors.exception({
+            header: prefix,
+            message: `${argument} is not iterable.`
+          });
+        }
+        while (true) {
+          const { done, value } = method.next();
+          if (done) {
+            break;
+          }
+          seq.push(converter(value, prefix, `${argument}[${index++}]`));
+        }
+        return seq;
+      };
+    };
+    webidl.recordConverter = function(keyConverter, valueConverter) {
+      return (O3, prefix, argument) => {
+        if (webidl.util.Type(O3) !== OBJECT) {
+          throw webidl.errors.exception({
+            header: prefix,
+            message: `${argument} ("${webidl.util.TypeValueToString(O3)}") is not an Object.`
+          });
+        }
+        const result = {};
+        if (!types3.isProxy(O3)) {
+          const keys2 = [...Object.getOwnPropertyNames(O3), ...Object.getOwnPropertySymbols(O3)];
+          for (const key of keys2) {
+            const keyName = webidl.util.Stringify(key);
+            const typedKey = keyConverter(key, prefix, `Key ${keyName} in ${argument}`);
+            const typedValue = valueConverter(O3[key], prefix, `${argument}[${keyName}]`);
+            result[typedKey] = typedValue;
+          }
+          return result;
+        }
+        const keys = Reflect.ownKeys(O3);
+        for (const key of keys) {
+          const desc = Reflect.getOwnPropertyDescriptor(O3, key);
+          if (desc?.enumerable) {
+            const typedKey = keyConverter(key, prefix, argument);
+            const typedValue = valueConverter(O3[key], prefix, argument);
+            result[typedKey] = typedValue;
+          }
+        }
+        return result;
+      };
+    };
+    webidl.interfaceConverter = function(TypeCheck, name) {
+      return (V3, prefix, argument) => {
+        if (!TypeCheck(V3)) {
+          throw webidl.errors.exception({
+            header: prefix,
+            message: `Expected ${argument} ("${webidl.util.Stringify(V3)}") to be an instance of ${name}.`
+          });
+        }
+        return V3;
+      };
+    };
+    webidl.dictionaryConverter = function(converters) {
+      converters.sort((a, b2) => (a.key > b2.key) - (a.key < b2.key));
+      return (dictionary, prefix, argument) => {
+        const dict = {};
+        if (dictionary != null && webidl.util.Type(dictionary) !== OBJECT) {
+          throw webidl.errors.exception({
+            header: prefix,
+            message: `Expected ${dictionary} to be one of: Null, Undefined, Object.`
+          });
+        }
+        for (const options of converters) {
+          const { key, defaultValue, required, converter } = options;
+          if (required === true) {
+            if (dictionary == null || !Object.hasOwn(dictionary, key)) {
+              throw webidl.errors.exception({
+                header: prefix,
+                message: `Missing required key "${key}".`
+              });
+            }
+          }
+          let value = dictionary?.[key];
+          const hasDefault = defaultValue !== void 0;
+          if (hasDefault && value === void 0) {
+            value = defaultValue();
+          }
+          if (required || hasDefault || value !== void 0) {
+            value = converter(value, prefix, `${argument}.${key}`);
+            if (options.allowedValues && !options.allowedValues.includes(value)) {
+              throw webidl.errors.exception({
+                header: prefix,
+                message: `${value} is not an accepted type. Expected one of ${options.allowedValues.join(", ")}.`
+              });
+            }
+            dict[key] = value;
+          }
+        }
+        return dict;
+      };
+    };
+    webidl.nullableConverter = function(converter) {
+      return (V3, prefix, argument) => {
+        if (V3 === null) {
+          return V3;
+        }
+        return converter(V3, prefix, argument);
+      };
+    };
+    webidl.is.USVString = function(value) {
+      return typeof value === "string" && value.isWellFormed();
+    };
+    webidl.is.ReadableStream = webidl.util.MakeTypeAssertion(ReadableStream);
+    webidl.is.Blob = webidl.util.MakeTypeAssertion(Blob);
+    webidl.is.URLSearchParams = webidl.util.MakeTypeAssertion(URLSearchParams);
+    webidl.is.File = webidl.util.MakeTypeAssertion(File);
+    webidl.is.URL = webidl.util.MakeTypeAssertion(URL);
+    webidl.is.AbortSignal = webidl.util.MakeTypeAssertion(AbortSignal);
+    webidl.is.MessagePort = webidl.util.MakeTypeAssertion(MessagePort);
+    webidl.is.BufferSource = function(V3) {
+      return types3.isArrayBuffer(V3) || ArrayBuffer.isView(V3) && types3.isArrayBuffer(V3.buffer);
+    };
+    webidl.util.getCopyOfBytesHeldByBufferSource = function(bufferSource) {
+      const jsBufferSource = bufferSource;
+      let jsArrayBuffer = jsBufferSource;
+      let offset = 0;
+      let length = 0;
+      if (types3.isTypedArray(jsBufferSource) || types3.isDataView(jsBufferSource)) {
+        jsArrayBuffer = jsBufferSource.buffer;
+        offset = jsBufferSource.byteOffset;
+        length = jsBufferSource.byteLength;
+      } else {
+        assert(types3.isAnyArrayBuffer(jsBufferSource));
+        length = jsBufferSource.byteLength;
+      }
+      if (jsArrayBuffer.detached) {
+        return new Uint8Array(0);
+      }
+      const bytes = new Uint8Array(length);
+      const view = new Uint8Array(jsArrayBuffer, offset, length);
+      bytes.set(view);
+      return bytes;
+    };
+    webidl.converters.DOMString = function(V3, prefix, argument, flags) {
+      if (V3 === null && webidl.util.HasFlag(flags, webidl.attributes.LegacyNullToEmptyString)) {
+        return "";
+      }
+      if (typeof V3 === "symbol") {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} is a symbol, which cannot be converted to a DOMString.`
+        });
+      }
+      return String(V3);
+    };
+    webidl.converters.ByteString = function(V3, prefix, argument) {
+      if (typeof V3 === "symbol") {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} is a symbol, which cannot be converted to a ByteString.`
+        });
+      }
+      const x3 = String(V3);
+      for (let index = 0; index < x3.length; index++) {
+        if (x3.charCodeAt(index) > 255) {
+          throw new TypeError(
+            `Cannot convert argument to a ByteString because the character at index ${index} has a value of ${x3.charCodeAt(index)} which is greater than 255.`
+          );
+        }
+      }
+      return x3;
+    };
+    webidl.converters.USVString = function(value) {
+      if (typeof value === "string") {
+        return value.toWellFormed();
+      }
+      return `${value}`.toWellFormed();
+    };
+    webidl.converters.boolean = function(V3) {
+      const x3 = Boolean(V3);
+      return x3;
+    };
+    webidl.converters.any = function(V3) {
+      return V3;
+    };
+    webidl.converters["long long"] = function(V3, prefix, argument) {
+      const x3 = webidl.util.ConvertToInt(V3, 64, "signed", 0, prefix, argument);
+      return x3;
+    };
+    webidl.converters["unsigned long long"] = function(V3, prefix, argument) {
+      const x3 = webidl.util.ConvertToInt(V3, 64, "unsigned", 0, prefix, argument);
+      return x3;
+    };
+    webidl.converters["unsigned long"] = function(V3, prefix, argument) {
+      const x3 = webidl.util.ConvertToInt(V3, 32, "unsigned", 0, prefix, argument);
+      return x3;
+    };
+    webidl.converters["unsigned short"] = function(V3, prefix, argument, flags) {
+      const x3 = webidl.util.ConvertToInt(V3, 16, "unsigned", flags, prefix, argument);
+      return x3;
+    };
+    webidl.converters.ArrayBuffer = function(V3, prefix, argument, flags) {
+      if (webidl.util.Type(V3) !== OBJECT || !types3.isArrayBuffer(V3)) {
+        throw webidl.errors.conversionFailed({
+          prefix,
+          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+          types: ["ArrayBuffer"]
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a resizable ArrayBuffer.`
+        });
+      }
+      return V3;
+    };
+    webidl.converters.SharedArrayBuffer = function(V3, prefix, argument, flags) {
+      if (webidl.util.Type(V3) !== OBJECT || !types3.isSharedArrayBuffer(V3)) {
+        throw webidl.errors.conversionFailed({
+          prefix,
+          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+          types: ["SharedArrayBuffer"]
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a resizable SharedArrayBuffer.`
+        });
+      }
+      return V3;
+    };
+    webidl.converters.TypedArray = function(V3, T2, prefix, argument, flags) {
+      if (webidl.util.Type(V3) !== OBJECT || !types3.isTypedArray(V3) || V3.constructor.name !== T2.name) {
+        throw webidl.errors.conversionFailed({
+          prefix,
+          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+          types: [T2.name]
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a shared array buffer.`
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a resizable array buffer.`
+        });
+      }
+      return V3;
+    };
+    webidl.converters.DataView = function(V3, prefix, argument, flags) {
+      if (webidl.util.Type(V3) !== OBJECT || !types3.isDataView(V3)) {
+        throw webidl.errors.conversionFailed({
+          prefix,
+          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+          types: ["DataView"]
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a shared array buffer.`
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a resizable array buffer.`
+        });
+      }
+      return V3;
+    };
+    webidl.converters.ArrayBufferView = function(V3, prefix, argument, flags) {
+      if (webidl.util.Type(V3) !== OBJECT || !types3.isArrayBufferView(V3)) {
+        throw webidl.errors.conversionFailed({
+          prefix,
+          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+          types: ["ArrayBufferView"]
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a shared array buffer.`
+        });
+      }
+      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a view on a resizable array buffer.`
+        });
+      }
+      return V3;
+    };
+    webidl.converters.BufferSource = function(V3, prefix, argument, flags) {
+      if (types3.isArrayBuffer(V3)) {
+        return webidl.converters.ArrayBuffer(V3, prefix, argument, flags);
+      }
+      if (types3.isArrayBufferView(V3)) {
+        flags &= ~webidl.attributes.AllowShared;
+        return webidl.converters.ArrayBufferView(V3, prefix, argument, flags);
+      }
+      if (types3.isSharedArrayBuffer(V3)) {
+        throw webidl.errors.exception({
+          header: prefix,
+          message: `${argument} cannot be a SharedArrayBuffer.`
+        });
+      }
+      throw webidl.errors.conversionFailed({
+        prefix,
+        argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+        types: ["ArrayBuffer", "ArrayBufferView"]
+      });
+    };
+    webidl.converters.AllowSharedBufferSource = function(V3, prefix, argument, flags) {
+      if (types3.isArrayBuffer(V3)) {
+        return webidl.converters.ArrayBuffer(V3, prefix, argument, flags);
+      }
+      if (types3.isSharedArrayBuffer(V3)) {
+        return webidl.converters.SharedArrayBuffer(V3, prefix, argument, flags);
+      }
+      if (types3.isArrayBufferView(V3)) {
+        flags |= webidl.attributes.AllowShared;
+        return webidl.converters.ArrayBufferView(V3, prefix, argument, flags);
+      }
+      throw webidl.errors.conversionFailed({
+        prefix,
+        argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
+        types: ["ArrayBuffer", "SharedArrayBuffer", "ArrayBufferView"]
+      });
+    };
+    webidl.converters["sequence<ByteString>"] = webidl.sequenceConverter(
+      webidl.converters.ByteString
+    );
+    webidl.converters["sequence<sequence<ByteString>>"] = webidl.sequenceConverter(
+      webidl.converters["sequence<ByteString>"]
+    );
+    webidl.converters["record<ByteString, ByteString>"] = webidl.recordConverter(
+      webidl.converters.ByteString,
+      webidl.converters.ByteString
+    );
+    webidl.converters.Blob = webidl.interfaceConverter(webidl.is.Blob, "Blob");
+    webidl.converters.AbortSignal = webidl.interfaceConverter(
+      webidl.is.AbortSignal,
+      "AbortSignal"
+    );
+    webidl.converters.EventHandlerNonNull = function(V3) {
+      if (webidl.util.Type(V3) !== OBJECT) {
+        return null;
+      }
+      if (typeof V3 === "function") {
+        return V3;
+      }
+      return () => {
+      };
+    };
+    webidl.attributes = {
+      Clamp: 1 << 0,
+      EnforceRange: 1 << 1,
+      AllowShared: 1 << 2,
+      AllowResizable: 1 << 3,
+      LegacyNullToEmptyString: 1 << 4
+    };
+    module2.exports = {
+      webidl
+    };
+  }
+});
+
+// node_modules/undici/lib/web/fetch/util.js
+var require_util10 = __commonJS({
+  "node_modules/undici/lib/web/fetch/util.js"(exports2, module2) {
+    "use strict";
+    var { Transform } = require("node:stream");
+    var zlib2 = require("node:zlib");
+    var { redirectStatusSet, referrerPolicyTokens, badPortsSet } = require_constants7();
+    var { getGlobalOrigin } = require_global3();
+    var { collectAnHTTPQuotedString, parseMIMEType } = require_data_url2();
+    var { performance: performance2 } = require("node:perf_hooks");
+    var { isValidHTTPToken, normalizedMethodRecordsBase } = require_util9();
+    var assert = require("node:assert");
+    var { isUint8Array } = require("node:util/types");
+    var { webidl } = require_webidl2();
+    var { isomorphicEncode, collectASequenceOfCodePoints, removeChars } = require_infra();
+    function responseURL(response) {
+      const urlList = response.urlList;
+      const length = urlList.length;
+      return length === 0 ? null : urlList[length - 1].toString();
+    }
+    function responseLocationURL(response, requestFragment) {
+      if (!redirectStatusSet.has(response.status)) {
+        return null;
+      }
+      let location = response.headersList.get("location", true);
+      if (location !== null && isValidHeaderValue(location)) {
+        if (!isValidEncodedURL(location)) {
+          location = normalizeBinaryStringToUtf8(location);
+        }
+        location = new URL(location, responseURL(response));
+      }
+      if (location && !location.hash) {
+        location.hash = requestFragment;
+      }
+      return location;
+    }
+    function isValidEncodedURL(url2) {
+      for (let i = 0; i < url2.length; ++i) {
+        const code = url2.charCodeAt(i);
+        if (code > 126 || // Non-US-ASCII + DEL
+        code < 32) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function normalizeBinaryStringToUtf8(value) {
+      return Buffer.from(value, "binary").toString("utf8");
+    }
+    function requestCurrentURL(request) {
+      return request.urlList[request.urlList.length - 1];
+    }
+    function requestBadPort(request) {
+      const url2 = requestCurrentURL(request);
+      if (urlIsHttpHttpsScheme(url2) && badPortsSet.has(url2.port)) {
+        return "blocked";
+      }
+      return "allowed";
+    }
+    function isErrorLike(object) {
+      return object instanceof Error || (object?.constructor?.name === "Error" || object?.constructor?.name === "DOMException");
+    }
+    function isValidReasonPhrase(statusText) {
+      for (let i = 0; i < statusText.length; ++i) {
+        const c = statusText.charCodeAt(i);
+        if (!(c === 9 || // HTAB
+        c >= 32 && c <= 126 || // SP / VCHAR
+        c >= 128 && c <= 255)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    var isValidHeaderName2 = isValidHTTPToken;
+    function isValidHeaderValue(potentialValue) {
+      return (potentialValue[0] === "	" || potentialValue[0] === " " || potentialValue[potentialValue.length - 1] === "	" || potentialValue[potentialValue.length - 1] === " " || potentialValue.includes("\n") || potentialValue.includes("\r") || potentialValue.includes("\0")) === false;
+    }
+    function parseReferrerPolicy(actualResponse) {
+      const policyHeader = (actualResponse.headersList.get("referrer-policy", true) ?? "").split(",");
+      let policy = "";
+      if (policyHeader.length) {
+        for (let i = policyHeader.length; i !== 0; i--) {
+          const token = policyHeader[i - 1].trim();
+          if (referrerPolicyTokens.has(token)) {
+            policy = token;
+            break;
+          }
+        }
+      }
+      return policy;
+    }
+    function setRequestReferrerPolicyOnRedirect(request, actualResponse) {
+      const policy = parseReferrerPolicy(actualResponse);
+      if (policy !== "") {
+        request.referrerPolicy = policy;
+      }
+    }
+    function crossOriginResourcePolicyCheck() {
+      return "allowed";
+    }
+    function corsCheck() {
+      return "success";
+    }
+    function TAOCheck() {
+      return "success";
+    }
+    function appendFetchMetadata(httpRequest) {
+      if (!isURLPotentiallyTrustworthy(requestCurrentURL(httpRequest))) {
+        return;
+      }
+      let header = null;
+      header = httpRequest.mode;
+      httpRequest.headersList.set("sec-fetch-mode", header, true);
+    }
+    function appendRequestOriginHeader(request) {
+      let serializedOrigin = request.origin;
+      if (serializedOrigin === "client" || serializedOrigin === void 0) {
+        return;
+      }
+      if (request.responseTainting === "cors" || request.mode === "websocket") {
+        request.headersList.append("origin", serializedOrigin, true);
+      } else if (request.method !== "GET" && request.method !== "HEAD") {
+        switch (request.referrerPolicy) {
+          case "no-referrer":
+            serializedOrigin = null;
+            break;
+          case "no-referrer-when-downgrade":
+          case "strict-origin":
+          case "strict-origin-when-cross-origin":
+            if (request.origin && urlHasHttpsScheme(request.origin) && !urlHasHttpsScheme(requestCurrentURL(request))) {
+              serializedOrigin = null;
+            }
+            break;
+          case "same-origin":
+            if (!sameOrigin(request, requestCurrentURL(request))) {
+              serializedOrigin = null;
+            }
+            break;
+          default:
+        }
+        request.headersList.append("origin", serializedOrigin, true);
+      }
+    }
+    function coarsenTime(timestamp, crossOriginIsolatedCapability) {
+      return timestamp;
+    }
+    function clampAndCoarsenConnectionTimingInfo(connectionTimingInfo, defaultStartTime, crossOriginIsolatedCapability) {
+      if (!connectionTimingInfo?.startTime || connectionTimingInfo.startTime < defaultStartTime) {
+        return {
+          domainLookupStartTime: defaultStartTime,
+          domainLookupEndTime: defaultStartTime,
+          connectionStartTime: defaultStartTime,
+          connectionEndTime: defaultStartTime,
+          secureConnectionStartTime: defaultStartTime,
+          ALPNNegotiatedProtocol: connectionTimingInfo?.ALPNNegotiatedProtocol
+        };
+      }
+      return {
+        domainLookupStartTime: coarsenTime(connectionTimingInfo.domainLookupStartTime, crossOriginIsolatedCapability),
+        domainLookupEndTime: coarsenTime(connectionTimingInfo.domainLookupEndTime, crossOriginIsolatedCapability),
+        connectionStartTime: coarsenTime(connectionTimingInfo.connectionStartTime, crossOriginIsolatedCapability),
+        connectionEndTime: coarsenTime(connectionTimingInfo.connectionEndTime, crossOriginIsolatedCapability),
+        secureConnectionStartTime: coarsenTime(connectionTimingInfo.secureConnectionStartTime, crossOriginIsolatedCapability),
+        ALPNNegotiatedProtocol: connectionTimingInfo.ALPNNegotiatedProtocol
+      };
+    }
+    function coarsenedSharedCurrentTime(crossOriginIsolatedCapability) {
+      return coarsenTime(performance2.now(), crossOriginIsolatedCapability);
+    }
+    function createOpaqueTimingInfo(timingInfo) {
+      return {
+        startTime: timingInfo.startTime ?? 0,
+        redirectStartTime: 0,
+        redirectEndTime: 0,
+        postRedirectStartTime: timingInfo.startTime ?? 0,
+        finalServiceWorkerStartTime: 0,
+        finalNetworkResponseStartTime: 0,
+        finalNetworkRequestStartTime: 0,
+        endTime: 0,
+        encodedBodySize: 0,
+        decodedBodySize: 0,
+        finalConnectionTimingInfo: null
+      };
+    }
+    function makePolicyContainer() {
+      return {
+        referrerPolicy: "strict-origin-when-cross-origin"
+      };
+    }
+    function clonePolicyContainer(policyContainer) {
+      return {
+        referrerPolicy: policyContainer.referrerPolicy
+      };
+    }
+    function determineRequestsReferrer(request) {
+      const policy = request.referrerPolicy;
+      assert(policy);
+      let referrerSource = null;
+      if (request.referrer === "client") {
+        const globalOrigin = getGlobalOrigin();
+        if (!globalOrigin || globalOrigin.origin === "null") {
+          return "no-referrer";
+        }
+        referrerSource = new URL(globalOrigin);
+      } else if (webidl.is.URL(request.referrer)) {
+        referrerSource = request.referrer;
+      }
+      let referrerURL = stripURLForReferrer(referrerSource);
+      const referrerOrigin = stripURLForReferrer(referrerSource, true);
+      if (referrerURL.toString().length > 4096) {
+        referrerURL = referrerOrigin;
+      }
+      switch (policy) {
+        case "no-referrer":
+          return "no-referrer";
+        case "origin":
+          if (referrerOrigin != null) {
+            return referrerOrigin;
+          }
+          return stripURLForReferrer(referrerSource, true);
+        case "unsafe-url":
+          return referrerURL;
+        case "strict-origin": {
+          const currentURL = requestCurrentURL(request);
+          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
+            return "no-referrer";
+          }
+          return referrerOrigin;
+        }
+        case "strict-origin-when-cross-origin": {
+          const currentURL = requestCurrentURL(request);
+          if (sameOrigin(referrerURL, currentURL)) {
+            return referrerURL;
+          }
+          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
+            return "no-referrer";
+          }
+          return referrerOrigin;
+        }
+        case "same-origin":
+          if (sameOrigin(request, referrerURL)) {
+            return referrerURL;
+          }
+          return "no-referrer";
+        case "origin-when-cross-origin":
+          if (sameOrigin(request, referrerURL)) {
+            return referrerURL;
+          }
+          return referrerOrigin;
+        case "no-referrer-when-downgrade": {
+          const currentURL = requestCurrentURL(request);
+          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
+            return "no-referrer";
+          }
+          return referrerURL;
+        }
+      }
+    }
+    function stripURLForReferrer(url2, originOnly = false) {
+      assert(webidl.is.URL(url2));
+      url2 = new URL(url2);
+      if (urlIsLocal(url2)) {
+        return "no-referrer";
+      }
+      url2.username = "";
+      url2.password = "";
+      url2.hash = "";
+      if (originOnly === true) {
+        url2.pathname = "";
+        url2.search = "";
+      }
+      return url2;
+    }
+    var isPotentialleTrustworthyIPv4 = RegExp.prototype.test.bind(/^127\.(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){2}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/);
+    var isPotentiallyTrustworthyIPv6 = RegExp.prototype.test.bind(/^(?:(?:0{1,4}:){7}|(?:0{1,4}:){1,6}:|::)0{0,3}1$/);
+    function isOriginIPPotentiallyTrustworthy(origin2) {
+      if (origin2.includes(":")) {
+        if (origin2[0] === "[" && origin2[origin2.length - 1] === "]") {
+          origin2 = origin2.slice(1, -1);
+        }
+        return isPotentiallyTrustworthyIPv6(origin2);
+      }
+      return isPotentialleTrustworthyIPv4(origin2);
+    }
+    function isOriginPotentiallyTrustworthy(origin2) {
+      if (origin2 == null || origin2 === "null") {
+        return false;
+      }
+      origin2 = new URL(origin2);
+      if (origin2.protocol === "https:" || origin2.protocol === "wss:") {
+        return true;
+      }
+      if (isOriginIPPotentiallyTrustworthy(origin2.hostname)) {
+        return true;
+      }
+      if (origin2.hostname === "localhost" || origin2.hostname === "localhost.") {
+        return true;
+      }
+      if (origin2.hostname.endsWith(".localhost") || origin2.hostname.endsWith(".localhost.")) {
+        return true;
+      }
+      if (origin2.protocol === "file:") {
+        return true;
+      }
+      return false;
+    }
+    function isURLPotentiallyTrustworthy(url2) {
+      if (!webidl.is.URL(url2)) {
+        return false;
+      }
+      if (url2.href === "about:blank" || url2.href === "about:srcdoc") {
+        return true;
+      }
+      if (url2.protocol === "data:") return true;
+      if (url2.protocol === "blob:") return true;
+      return isOriginPotentiallyTrustworthy(url2.origin);
+    }
+    function tryUpgradeRequestToAPotentiallyTrustworthyURL(request) {
+    }
+    function sameOrigin(A3, B3) {
+      if (A3.origin === B3.origin && A3.origin === "null") {
+        return true;
+      }
+      if (A3.protocol === B3.protocol && A3.hostname === B3.hostname && A3.port === B3.port) {
+        return true;
+      }
+      return false;
+    }
+    function isAborted(fetchParams) {
+      return fetchParams.controller.state === "aborted";
+    }
+    function isCancelled(fetchParams) {
+      return fetchParams.controller.state === "aborted" || fetchParams.controller.state === "terminated";
+    }
+    function normalizeMethod(method) {
+      return normalizedMethodRecordsBase[method.toLowerCase()] ?? method;
+    }
+    var esIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+    function createIterator(name, kInternalIterator, keyIndex = 0, valueIndex = 1) {
+      class FastIterableIterator {
+        /** @type {any} */
+        #target;
+        /** @type {'key' | 'value' | 'key+value'} */
+        #kind;
+        /** @type {number} */
+        #index;
+        /**
+         * @see https://webidl.spec.whatwg.org/#dfn-default-iterator-object
+         * @param {unknown} target
+         * @param {'key' | 'value' | 'key+value'} kind
+         */
+        constructor(target, kind) {
+          this.#target = target;
+          this.#kind = kind;
+          this.#index = 0;
+        }
+        next() {
+          if (typeof this !== "object" || this === null || !(#target in this)) {
+            throw new TypeError(
+              `'next' called on an object that does not implement interface ${name} Iterator.`
+            );
+          }
+          const index = this.#index;
+          const values = kInternalIterator(this.#target);
+          const len = values.length;
+          if (index >= len) {
+            return {
+              value: void 0,
+              done: true
+            };
+          }
+          const { [keyIndex]: key, [valueIndex]: value } = values[index];
+          this.#index = index + 1;
+          let result;
+          switch (this.#kind) {
+            case "key":
+              result = key;
+              break;
+            case "value":
+              result = value;
+              break;
+            case "key+value":
+              result = [key, value];
+              break;
+          }
+          return {
+            value: result,
+            done: false
+          };
+        }
+      }
+      delete FastIterableIterator.prototype.constructor;
+      Object.setPrototypeOf(FastIterableIterator.prototype, esIteratorPrototype);
+      Object.defineProperties(FastIterableIterator.prototype, {
+        [Symbol.toStringTag]: {
+          writable: false,
+          enumerable: false,
+          configurable: true,
+          value: `${name} Iterator`
+        },
+        next: { writable: true, enumerable: true, configurable: true }
+      });
+      return function(target, kind) {
+        return new FastIterableIterator(target, kind);
+      };
+    }
+    function iteratorMixin(name, object, kInternalIterator, keyIndex = 0, valueIndex = 1, brandCheck) {
+      const makeIterator = createIterator(name, kInternalIterator, keyIndex, valueIndex);
+      const properties = {
+        keys: {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: function keys() {
+            webidl.brandCheck(this, brandCheck);
+            return makeIterator(this, "key");
+          }
+        },
+        values: {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: function values() {
+            webidl.brandCheck(this, brandCheck);
+            return makeIterator(this, "value");
+          }
+        },
+        entries: {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: function entries() {
+            webidl.brandCheck(this, brandCheck);
+            return makeIterator(this, "key+value");
+          }
+        },
+        forEach: {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: function forEach2(callbackfn, thisArg = globalThis) {
+            webidl.brandCheck(this, brandCheck);
+            webidl.argumentLengthCheck(arguments, 1, `${name}.forEach`);
+            if (typeof callbackfn !== "function") {
+              throw new TypeError(
+                `Failed to execute 'forEach' on '${name}': parameter 1 is not of type 'Function'.`
+              );
+            }
+            for (const { 0: key, 1: value } of makeIterator(this, "key+value")) {
+              callbackfn.call(thisArg, value, key, this);
+            }
+          }
+        }
+      };
+      return Object.defineProperties(object.prototype, {
+        ...properties,
+        [Symbol.iterator]: {
+          writable: true,
+          enumerable: false,
+          configurable: true,
+          value: properties.entries.value
+        }
+      });
+    }
+    function fullyReadBody(body, processBody, processBodyError) {
+      const successSteps = processBody;
+      const errorSteps = processBodyError;
+      try {
+        const reader = body.stream.getReader();
+        readAllBytes(reader, successSteps, errorSteps);
+      } catch (e) {
+        errorSteps(e);
+      }
+    }
+    function readableStreamClose(controller) {
+      try {
+        controller.close();
+        controller.byobRequest?.respond(0);
+      } catch (err) {
+        if (!err.message.includes("Controller is already closed") && !err.message.includes("ReadableStream is already closed")) {
+          throw err;
+        }
+      }
+    }
+    async function readAllBytes(reader, successSteps, failureSteps) {
+      try {
+        const bytes = [];
+        let byteLength = 0;
+        do {
+          const { done, value: chunk } = await reader.read();
+          if (done) {
+            successSteps(Buffer.concat(bytes, byteLength));
+            return;
+          }
+          if (!isUint8Array(chunk)) {
+            failureSteps(new TypeError("Received non-Uint8Array chunk"));
+            return;
+          }
+          bytes.push(chunk);
+          byteLength += chunk.length;
+        } while (true);
+      } catch (e) {
+        failureSteps(e);
+      }
+    }
+    function urlIsLocal(url2) {
+      assert("protocol" in url2);
+      const protocol = url2.protocol;
+      return protocol === "about:" || protocol === "blob:" || protocol === "data:";
+    }
+    function urlHasHttpsScheme(url2) {
+      return typeof url2 === "string" && url2[5] === ":" && url2[0] === "h" && url2[1] === "t" && url2[2] === "t" && url2[3] === "p" && url2[4] === "s" || url2.protocol === "https:";
+    }
+    function urlIsHttpHttpsScheme(url2) {
+      assert("protocol" in url2);
+      const protocol = url2.protocol;
+      return protocol === "http:" || protocol === "https:";
+    }
+    function simpleRangeHeaderValue(value, allowWhitespace) {
+      const data = value;
+      if (!data.startsWith("bytes")) {
+        return "failure";
+      }
+      const position = { position: 5 };
+      if (allowWhitespace) {
+        collectASequenceOfCodePoints(
+          (char) => char === "	" || char === " ",
+          data,
+          position
+        );
+      }
+      if (data.charCodeAt(position.position) !== 61) {
+        return "failure";
+      }
+      position.position++;
+      if (allowWhitespace) {
+        collectASequenceOfCodePoints(
+          (char) => char === "	" || char === " ",
+          data,
+          position
+        );
+      }
+      const rangeStart = collectASequenceOfCodePoints(
+        (char) => {
+          const code = char.charCodeAt(0);
+          return code >= 48 && code <= 57;
+        },
+        data,
+        position
+      );
+      const rangeStartValue = rangeStart.length ? Number(rangeStart) : null;
+      if (allowWhitespace) {
+        collectASequenceOfCodePoints(
+          (char) => char === "	" || char === " ",
+          data,
+          position
+        );
+      }
+      if (data.charCodeAt(position.position) !== 45) {
+        return "failure";
+      }
+      position.position++;
+      if (allowWhitespace) {
+        collectASequenceOfCodePoints(
+          (char) => char === "	" || char === " ",
+          data,
+          position
+        );
+      }
+      const rangeEnd = collectASequenceOfCodePoints(
+        (char) => {
+          const code = char.charCodeAt(0);
+          return code >= 48 && code <= 57;
+        },
+        data,
+        position
+      );
+      const rangeEndValue = rangeEnd.length ? Number(rangeEnd) : null;
+      if (position.position < data.length) {
+        return "failure";
+      }
+      if (rangeEndValue === null && rangeStartValue === null) {
+        return "failure";
+      }
+      if (rangeStartValue !== null && rangeEndValue !== null && rangeStartValue > rangeEndValue) {
+        return "failure";
+      }
+      return { rangeStartValue, rangeEndValue };
+    }
+    function buildContentRange(rangeStart, rangeEnd, fullLength) {
+      let contentRange = "bytes ";
+      contentRange += isomorphicEncode(`${rangeStart}`);
+      contentRange += "-";
+      contentRange += isomorphicEncode(`${rangeEnd}`);
+      contentRange += "/";
+      contentRange += isomorphicEncode(`${fullLength}`);
+      return contentRange;
+    }
+    var InflateStream = class extends Transform {
+      #zlibOptions;
+      /** @param {zlib.ZlibOptions} [zlibOptions] */
+      constructor(zlibOptions2) {
+        super();
+        this.#zlibOptions = zlibOptions2;
+      }
+      _transform(chunk, encoding, callback) {
+        if (!this._inflateStream) {
+          if (chunk.length === 0) {
+            callback();
+            return;
+          }
+          this._inflateStream = (chunk[0] & 15) === 8 ? zlib2.createInflate(this.#zlibOptions) : zlib2.createInflateRaw(this.#zlibOptions);
+          this._inflateStream.on("data", this.push.bind(this));
+          this._inflateStream.on("end", () => this.push(null));
+          this._inflateStream.on("error", (err) => this.destroy(err));
+        }
+        this._inflateStream.write(chunk, encoding, callback);
+      }
+      _final(callback) {
+        if (this._inflateStream) {
+          this._inflateStream.end();
+          this._inflateStream = null;
+        }
+        callback();
+      }
+    };
+    function createInflate(zlibOptions2) {
+      return new InflateStream(zlibOptions2);
+    }
+    function extractMimeType(headers) {
+      let charset = null;
+      let essence = null;
+      let mimeType = null;
+      const values = getDecodeSplit("content-type", headers);
+      if (values === null) {
+        return "failure";
+      }
+      for (const value of values) {
+        const temporaryMimeType = parseMIMEType(value);
+        if (temporaryMimeType === "failure" || temporaryMimeType.essence === "*/*") {
+          continue;
+        }
+        mimeType = temporaryMimeType;
+        if (mimeType.essence !== essence) {
+          charset = null;
+          if (mimeType.parameters.has("charset")) {
+            charset = mimeType.parameters.get("charset");
+          }
+          essence = mimeType.essence;
+        } else if (!mimeType.parameters.has("charset") && charset !== null) {
+          mimeType.parameters.set("charset", charset);
+        }
+      }
+      if (mimeType == null) {
+        return "failure";
+      }
+      return mimeType;
+    }
+    function gettingDecodingSplitting(value) {
+      const input = value;
+      const position = { position: 0 };
+      const values = [];
+      let temporaryValue = "";
+      while (position.position < input.length) {
+        temporaryValue += collectASequenceOfCodePoints(
+          (char) => char !== '"' && char !== ",",
+          input,
+          position
+        );
+        if (position.position < input.length) {
+          if (input.charCodeAt(position.position) === 34) {
+            temporaryValue += collectAnHTTPQuotedString(
+              input,
+              position
+            );
+            if (position.position < input.length) {
+              continue;
+            }
+          } else {
+            assert(input.charCodeAt(position.position) === 44);
+            position.position++;
+          }
+        }
+        temporaryValue = removeChars(temporaryValue, true, true, (char) => char === 9 || char === 32);
+        values.push(temporaryValue);
+        temporaryValue = "";
+      }
+      return values;
+    }
+    function getDecodeSplit(name, list) {
+      const value = list.get(name, true);
+      if (value === null) {
+        return null;
+      }
+      return gettingDecodingSplitting(value);
+    }
+    function hasAuthenticationEntry(request) {
+      return false;
+    }
+    function includesCredentials(url2) {
+      return !!(url2.username || url2.password);
+    }
+    function isTraversableNavigable(navigable) {
+      return navigable != null && navigable !== "client" && navigable !== "no-traversable";
+    }
+    var EnvironmentSettingsObjectBase = class {
+      get baseUrl() {
+        return getGlobalOrigin();
+      }
+      get origin() {
+        return this.baseUrl?.origin;
+      }
+      policyContainer = makePolicyContainer();
+    };
+    var EnvironmentSettingsObject = class {
+      settingsObject = new EnvironmentSettingsObjectBase();
+    };
+    var environmentSettingsObject = new EnvironmentSettingsObject();
+    module2.exports = {
+      isAborted,
+      isCancelled,
+      isValidEncodedURL,
+      tryUpgradeRequestToAPotentiallyTrustworthyURL,
+      clampAndCoarsenConnectionTimingInfo,
+      coarsenedSharedCurrentTime,
+      determineRequestsReferrer,
+      makePolicyContainer,
+      clonePolicyContainer,
+      appendFetchMetadata,
+      appendRequestOriginHeader,
+      TAOCheck,
+      corsCheck,
+      crossOriginResourcePolicyCheck,
+      createOpaqueTimingInfo,
+      setRequestReferrerPolicyOnRedirect,
+      isValidHTTPToken,
+      requestBadPort,
+      requestCurrentURL,
+      responseURL,
+      responseLocationURL,
+      isURLPotentiallyTrustworthy,
+      isValidReasonPhrase,
+      sameOrigin,
+      normalizeMethod,
+      iteratorMixin,
+      createIterator,
+      isValidHeaderName: isValidHeaderName2,
+      isValidHeaderValue,
+      isErrorLike,
+      fullyReadBody,
+      readableStreamClose,
+      urlIsLocal,
+      urlHasHttpsScheme,
+      urlIsHttpHttpsScheme,
+      readAllBytes,
+      simpleRangeHeaderValue,
+      buildContentRange,
+      createInflate,
+      extractMimeType,
+      getDecodeSplit,
+      environmentSettingsObject,
+      isOriginIPPotentiallyTrustworthy,
+      hasAuthenticationEntry,
+      includesCredentials,
+      isTraversableNavigable
+    };
+  }
+});
+
+// node_modules/undici/lib/util/runtime-features.js
+var require_runtime_features = __commonJS({
+  "node_modules/undici/lib/util/runtime-features.js"(exports2, module2) {
+    "use strict";
+    var lazyLoaders = {
+      __proto__: null,
+      "node:crypto": () => require("node:crypto"),
+      "node:sqlite": () => require("node:sqlite")
+    };
+    function detectRuntimeFeatureByNodeModule(moduleName) {
+      try {
+        lazyLoaders[moduleName]();
+        return true;
+      } catch (err) {
+        if (err.code !== "ERR_UNKNOWN_BUILTIN_MODULE" && err.code !== "ERR_NO_CRYPTO") {
+          throw err;
+        }
+        return false;
+      }
+    }
+    var runtimeFeaturesAsNodeModule = (
+      /** @type {const} */
+      ["crypto", "sqlite"]
+    );
+    function detectRuntimeFeature(feature) {
+      if (runtimeFeaturesAsNodeModule.includes(
+        /** @type {RuntimeFeatureByNodeModule} */
+        feature
+      )) {
+        return detectRuntimeFeatureByNodeModule(`node:${feature}`);
+      }
+      throw new TypeError(`unknown feature: ${feature}`);
+    }
+    var RuntimeFeatures = class {
+      /** @type {Map<Feature, boolean>} */
+      #map = /* @__PURE__ */ new Map();
+      /**
+       * Clears all cached feature detections.
+       */
+      clear() {
+        this.#map.clear();
+      }
+      /**
+       * @param {Feature} feature
+       * @returns {boolean}
+       */
+      has(feature) {
+        return this.#map.get(feature) ?? this.#detectRuntimeFeature(feature);
+      }
+      /**
+       * @param {Feature} feature
+       * @param {boolean} value
+       */
+      set(feature, value) {
+        if (runtimeFeaturesAsNodeModule.includes(feature) === false) {
+          throw new TypeError(`unknown feature: ${feature}`);
+        }
+        this.#map.set(feature, value);
+      }
+      /**
+       * @param {Feature} feature
+       * @returns {boolean}
+       */
+      #detectRuntimeFeature(feature) {
+        const result = detectRuntimeFeature(feature);
+        this.#map.set(feature, result);
+        return result;
+      }
+    };
+    var instance = new RuntimeFeatures();
+    module2.exports.runtimeFeatures = instance;
+    module2.exports.default = instance;
+  }
+});
+
+// node_modules/undici/lib/web/fetch/formdata.js
+var require_formdata2 = __commonJS({
+  "node_modules/undici/lib/web/fetch/formdata.js"(exports2, module2) {
+    "use strict";
+    var { iteratorMixin } = require_util10();
+    var { kEnumerableProperty } = require_util9();
+    var { webidl } = require_webidl2();
+    var nodeUtil = require("node:util");
+    var { runtimeFeatures } = require_runtime_features();
+    var random = runtimeFeatures.has("crypto") ? require("node:crypto").randomInt : (max) => Math.floor(Math.random() * max);
+    var getFormDataState;
+    var setFormDataState;
+    var getFormDataBoundary;
+    var FormData3 = class {
+      #state = [];
+      #boundary = null;
+      constructor(form = void 0) {
+        webidl.util.markAsUncloneable(this);
+        if (form !== void 0) {
+          throw webidl.errors.conversionFailed({
+            prefix: "FormData constructor",
+            argument: "Argument 1",
+            types: ["undefined"]
+          });
+        }
+      }
+      append(name, value, filename = void 0) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.append";
+        webidl.argumentLengthCheck(arguments, 2, prefix);
+        name = webidl.converters.USVString(name);
+        if (arguments.length === 3 || webidl.is.Blob(value)) {
+          value = webidl.converters.Blob(value, prefix, "value");
+          if (filename !== void 0) {
+            filename = webidl.converters.USVString(filename);
+          }
+        } else {
+          value = webidl.converters.USVString(value);
+        }
+        const entry = makeEntry(name, value, filename);
+        this.#state.push(entry);
+      }
+      delete(name) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.delete";
+        webidl.argumentLengthCheck(arguments, 1, prefix);
+        name = webidl.converters.USVString(name);
+        this.#state = this.#state.filter((entry) => entry.name !== name);
+      }
+      get(name) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.get";
+        webidl.argumentLengthCheck(arguments, 1, prefix);
+        name = webidl.converters.USVString(name);
+        const idx = this.#state.findIndex((entry) => entry.name === name);
+        if (idx === -1) {
+          return null;
+        }
+        return this.#state[idx].value;
+      }
+      getAll(name) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.getAll";
+        webidl.argumentLengthCheck(arguments, 1, prefix);
+        name = webidl.converters.USVString(name);
+        return this.#state.filter((entry) => entry.name === name).map((entry) => entry.value);
+      }
+      has(name) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.has";
+        webidl.argumentLengthCheck(arguments, 1, prefix);
+        name = webidl.converters.USVString(name);
+        return this.#state.findIndex((entry) => entry.name === name) !== -1;
+      }
+      set(name, value, filename = void 0) {
+        webidl.brandCheck(this, webidl.is.FormData);
+        const prefix = "FormData.set";
+        webidl.argumentLengthCheck(arguments, 2, prefix);
+        name = webidl.converters.USVString(name);
+        if (arguments.length === 3 || webidl.is.Blob(value)) {
+          value = webidl.converters.Blob(value, prefix, "value");
+          if (filename !== void 0) {
+            filename = webidl.converters.USVString(filename);
+          }
+        } else {
+          value = webidl.converters.USVString(value);
+        }
+        const entry = makeEntry(name, value, filename);
+        const idx = this.#state.findIndex((entry2) => entry2.name === name);
+        if (idx !== -1) {
+          this.#state = [
+            ...this.#state.slice(0, idx),
+            entry,
+            ...this.#state.slice(idx + 1).filter((entry2) => entry2.name !== name)
+          ];
+        } else {
+          this.#state.push(entry);
+        }
+      }
+      [nodeUtil.inspect.custom](depth, options) {
+        const state = this.#state.reduce((a, b2) => {
+          if (a[b2.name]) {
+            if (Array.isArray(a[b2.name])) {
+              a[b2.name].push(b2.value);
+            } else {
+              a[b2.name] = [a[b2.name], b2.value];
+            }
+          } else {
+            a[b2.name] = b2.value;
+          }
+          return a;
+        }, { __proto__: null });
+        options.depth ??= depth;
+        options.colors ??= true;
+        const output = nodeUtil.formatWithOptions(options, state);
+        return `FormData ${output.slice(output.indexOf("]") + 2)}`;
+      }
+      static {
+        getFormDataState = (formData) => formData.#state;
+        setFormDataState = (formData, newState) => {
+          formData.#state = newState;
+        };
+        getFormDataBoundary = (formData) => {
+          return formData.#boundary ??= `----formdata-undici-0${`${random(1e11)}`.padStart(11, "0")}`;
+        };
+        webidl.is.FormData = (arg) => {
+          return arg != null && typeof arg === "object" && #state in arg;
+        };
+      }
+    };
+    iteratorMixin("FormData", FormData3, getFormDataState, "name", "value", webidl.is.FormData);
+    Object.defineProperties(FormData3.prototype, {
+      append: kEnumerableProperty,
+      delete: kEnumerableProperty,
+      get: kEnumerableProperty,
+      getAll: kEnumerableProperty,
+      has: kEnumerableProperty,
+      set: kEnumerableProperty,
+      [Symbol.toStringTag]: {
+        value: "FormData",
+        configurable: true
+      }
+    });
+    function makeEntry(name, value, filename) {
+      if (typeof value === "string") {
+      } else {
+        if (!webidl.is.File(value)) {
+          value = new File([value], "blob", { type: value.type });
+        }
+        if (filename !== void 0) {
+          const options = {
+            type: value.type,
+            lastModified: value.lastModified
+          };
+          value = new File([value], filename, options);
+        }
+      }
+      return { name, value };
+    }
+    module2.exports = { FormData: FormData3, makeEntry, setFormDataState, getFormDataBoundary };
+  }
+});
+
 // node_modules/undici/lib/core/request.js
 var require_request3 = __commonJS({
   "node_modules/undici/lib/core/request.js"(exports2, module2) {
@@ -32997,7 +35612,12 @@ var require_request3 = __commonJS({
           this.body = body.byteLength ? Buffer.from(body) : null;
         } else if (typeof body === "string") {
           this.body = body.length ? Buffer.from(body) : null;
-        } else if (isFormDataLike(body) || isIterable2(body) || isBlobLike(body)) {
+        } else if (isFormDataLike(body)) {
+          if (!isUndiciFormData(body)) {
+            throw new InvalidArgumentError("body must be a FormData created by this undici package instance; FormData from other sources, such as the built-in FormData provided by Node.js, is not supported");
+          }
+          this.body = body;
+        } else if (isIterable2(body) || isBlobLike(body)) {
           this.body = body;
         } else {
           throw new InvalidArgumentError("body must be a string, a Buffer, a Readable stream, an iterable, or an async iterable");
@@ -33120,15 +35740,32 @@ var require_request3 = __commonJS({
           return false;
         }
       }
-      onRequestUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]|string[]|import('../../types/header.d.ts').IncomingHttpHeaders} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onRequestUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert(!this.aborted);
         assert(!this.completed);
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
         const controller = this[kController];
         if (controller) {
           controller.rawHeaders = headers;
         }
         const parsedHeaders = Array.isArray(headers) ? parseHeaders(headers) : headers;
-        return this[kHandler].onRequestUpgrade?.(controller, statusCode, parsedHeaders, socket);
+        const result = this[kHandler].onRequestUpgrade?.(controller, statusCode, parsedHeaders, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (channels.trailers.hasSubscribers) {
+            channels.trailers.publish({ request: this, trailers: [] });
+          }
+        }
+        return result;
       }
       onResponseEnd(trailers) {
         this.onFinally();
@@ -33263,6 +35900,14 @@ var require_request3 = __commonJS({
         request.headers.push(key, val);
       }
     }
+    var isFormData2;
+    function isUndiciFormData(body) {
+      if (isFormData2 === void 0) {
+        require_formdata2();
+        isFormData2 = require_webidl2().webidl.is.FormData;
+      }
+      return isFormData2(body);
+    }
     module2.exports = Request;
   }
 });
@@ -33272,6 +35917,7 @@ var require_dispatcher2 = __commonJS({
   "node_modules/undici/lib/dispatcher/dispatcher.js"(exports2, module2) {
     "use strict";
     var EventEmitter4 = require("node:events");
+    var { kOriginless, kUrl } = require_symbols6();
     var Dispatcher = class extends EventEmitter4 {
       dispatch() {
         throw new Error("not implemented");
@@ -33284,6 +35930,7 @@ var require_dispatcher2 = __commonJS({
       }
       compose(...args) {
         const interceptors = Array.isArray(args[0]) ? args[0] : args;
+        const interceptorOrigin = this[kOriginless] === true ? null : this[kUrl]?.origin;
         let dispatch = this.dispatch.bind(this);
         for (const interceptor of interceptors) {
           if (interceptor == null) {
@@ -33292,11 +35939,19 @@ var require_dispatcher2 = __commonJS({
           if (typeof interceptor !== "function") {
             throw new TypeError(`invalid interceptor, expected function received ${typeof interceptor}`);
           }
-          dispatch = interceptor(dispatch);
+          dispatch = interceptor(dispatch, interceptorOrigin);
           if (dispatch == null || typeof dispatch !== "function" || dispatch.length !== 2) {
             throw new TypeError("invalid interceptor");
           }
         }
+        const originalDispatch = dispatch;
+        const self2 = this;
+        dispatch = function(opts, handler) {
+          if (opts && typeof opts === "object" && !opts.origin && self2[kUrl]) {
+            opts = Object.assign({}, opts, { origin: self2[kUrl].origin });
+          }
+          return originalDispatch(opts, handler);
+        };
         return new Proxy(this, {
           get: (target, key) => key === "dispatch" ? dispatch : target[key]
         });
@@ -33310,6 +35965,7 @@ var require_dispatcher2 = __commonJS({
 var require_dispatcher_base2 = __commonJS({
   "node_modules/undici/lib/dispatcher/dispatcher-base.js"(exports2, module2) {
     "use strict";
+    var buffer = require("node:buffer");
     var Dispatcher = require_dispatcher2();
     var {
       ClientDestroyedError,
@@ -33317,9 +35973,11 @@ var require_dispatcher_base2 = __commonJS({
       InvalidArgumentError
     } = require_errors2();
     var { kDestroy, kClose, kClosed, kDestroyed, kDispatch } = require_symbols6();
+    var { defaultWebSocketMaxFragments, defaultWebSocketMaxPayloadSize } = require_constants6();
     var kOnDestroyed = /* @__PURE__ */ Symbol("onDestroyed");
     var kOnClosed = /* @__PURE__ */ Symbol("onClosed");
     var kWebSocketOptions = /* @__PURE__ */ Symbol("webSocketOptions");
+    var kEventSourceOptions = /* @__PURE__ */ Symbol("eventSourceOptions");
     var DispatcherBase = class extends Dispatcher {
       /** @type {boolean} */
       [kDestroyed] = false;
@@ -33335,15 +35993,23 @@ var require_dispatcher_base2 = __commonJS({
       constructor(opts) {
         super();
         this[kWebSocketOptions] = opts?.webSocket ?? {};
+        this[kEventSourceOptions] = opts?.eventSource ?? {};
       }
       /**
-       * @returns {import('../../types/dispatcher').WebSocketOptions}
+       * @returns {import('../../types/client').Client.WebSocketOptions}
        */
       get webSocketOptions() {
         return {
-          maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
-          maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
-          // 128 MB default
+          maxFragments: this[kWebSocketOptions].maxFragments ?? defaultWebSocketMaxFragments,
+          maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? defaultWebSocketMaxPayloadSize
+        };
+      }
+      /**
+       * @returns {import('../../types/client').Client.EventSourceOptions}
+       */
+      get eventSourceOptions() {
+        return {
+          maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer.kStringMaxLength
         };
       }
       /** @returns {boolean} */
@@ -33493,15 +36159,19 @@ var require_connect2 = __commonJS({
         if (this._sessionCache.has(sessionKey)) {
           this._sessionCache.delete(sessionKey);
         } else if (this._sessionCache.size >= this._maxCachedSessions) {
+          let evicted = false;
           for (const [key, ref] of this._sessionCache) {
             if (ref.deref() === void 0) {
               this._sessionCache.delete(key);
-              return;
+              evicted = true;
+              break;
             }
           }
-          const oldest = this._sessionCache.keys().next();
-          if (!oldest.done) {
-            this._sessionCache.delete(oldest.value);
+          if (!evicted) {
+            const oldest = this._sessionCache.keys().next();
+            if (!oldest.done) {
+              this._sessionCache.delete(oldest.value);
+            }
           }
         }
         this._sessionCache.set(sessionKey, new WeakRef(session));
@@ -33629,7 +36299,7 @@ var require_utils2 = __commonJS({
 });
 
 // node_modules/undici/lib/llhttp/constants.js
-var require_constants7 = __commonJS({
+var require_constants8 = __commonJS({
   "node_modules/undici/lib/llhttp/constants.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
@@ -34251,6 +36921,2688 @@ var require_constants7 = __commonJS({
   }
 });
 
+// node_modules/undici/lib/milo/simd.js
+var require_simd = __commonJS({
+  "node_modules/undici/lib/milo/simd.js"(exports2, module2) {
+    var wasmModule = new WebAssembly.Module(
+      Buffer.from(
+        "AGFzbQEAAAABQgtgA39/fwBgAX8Bf2ACf38AYAF/AGABfwF+YAJ/fgBgBH9/f38AYAABf2AIf39/f39/f3wAYAN/f38Bf2ACf38BfwKUBBwDZW52CG9uX2Vycm9yAAADZW52Cm9uX2hlYWRlcnMACANlbnYJb25fZmluaXNoAAADZW52EG9uX21lc3NhZ2Vfc3RhcnQAAANlbnYTb25fbWVzc2FnZV9jb21wbGV0ZQAAA2Vudgpvbl9yZXF1ZXN0AAADZW52C29uX3Jlc3BvbnNlAAADZW52CG9uX3Jlc2V0AAADZW52CW9uX21ldGhvZAAAA2VudgZvbl91cmwAAANlbnYLb25fcHJvdG9jb2wAAANlbnYKb25fdmVyc2lvbgAAA2Vudglvbl9zdGF0dXMAAANlbnYJb25fcmVhc29uAAADZW52Dm9uX2hlYWRlcl9uYW1lAAADZW52D29uX2hlYWRlcl92YWx1ZQAAA2Vudgpvbl9jb25uZWN0AAADZW52Cm9uX3VwZ3JhZGUAAANlbnYPb25fY2h1bmtfbGVuZ3RoAAADZW52F29uX2NodW5rX2V4dGVuc2lvbl9uYW1lAAADZW52GG9uX2NodW5rX2V4dGVuc2lvbl92YWx1ZQAAA2Vudghvbl9jaHVuawAAA2Vudgdvbl9ib2R5AAADZW52B29uX2RhdGEAAANlbnYPb25fdHJhaWxlcl9uYW1lAAADZW52EG9uX3RyYWlsZXJfdmFsdWUAAANlbnYLb25fdHJhaWxlcnMAAANlbnYPb25fc3RhdGVfY2hhbmdlAAADQkEGAAEDAwcCAwYDBAQBBAQBAQEEAQQEAQEBAQEBAQEBAQEBAQEHCQMCAwUFAgICBQICAgICAgIBAQEBCgECAwICAgUDAQARBgkBfwFBgIDAAAsHnQg5Bm1lbW9yeQIABWFsbG9jAB4FY2xlYXIAHwhjb21wbGV0ZQAgBmNyZWF0ZQAhB2RlYWxsb2MAIgdkZXN0cm95ACMEZmFpbAAkBmZpbmlzaAAlDmdldF9jaHVua19zaXplACYSZ2V0X2NvbnRlbnRfbGVuZ3RoACcOZ2V0X2Vycm9yX2NvZGUAKBlnZXRfZXJyb3JfZGVzY3JpcHRpb25fcmF3ACkUZ2V0X21heF9ib2R5X3BheWxvYWQAKhVnZXRfbWF4X2hlYWRlcl9sZW5ndGgAKxlnZXRfbWF4X3N0YXJ0X2xpbmVfbGVuZ3RoACwKZ2V0X21ldGhvZAAtCmdldF9wYXJzZWQALgxnZXRfcG9zaXRpb24ALxhnZXRfcmVtYWluaW5nX2NodW5rX3NpemUAMBxnZXRfcmVtYWluaW5nX2NvbnRlbnRfbGVuZ3RoADEJZ2V0X3N0YXRlADIKZ2V0X3N0YXR1cwAzHWhhc19jaHVua2VkX3RyYW5zZmVyX2VuY29kaW5nADQUaGFzX2Nvbm5lY3Rpb25fY2xvc2UANRZoYXNfY29ubmVjdGlvbl91cGdyYWRlADYSaGFzX2NvbnRlbnRfbGVuZ3RoADcMaGFzX3RyYWlsZXJzADgVaGFzX3RyYW5zZmVyX2VuY29kaW5nADkLaGFzX3VwZ3JhZGUAOg1pc19hdXRvZGV0ZWN0ADsKaXNfY29ubmVjdAA8CGlzX2RlYnVnAD0JaXNfcGF1c2VkAD4KaXNfcmVxdWVzdAA/Dm1pbG9faGFzX2RlYnVnAEAFcGFyc2UAQQVwYXVzZQBCBXJlc2V0AEMGcmVzdW1lAEQUc2V0X2FjdGl2ZV9jYWxsYmFja3MARRFzZXRfYWN0aXZlX2V2ZW50cwBGCXNldF9kZWJ1ZwBHDnNldF9pc19jb25uZWN0AEgOc2V0X2lzX3JlcXVlc3QASRRzZXRfbWF4X2JvZHlfcGF5bG9hZABKFXNldF9tYXhfaGVhZGVyX2xlbmd0aABLGXNldF9tYXhfc3RhcnRfbGluZV9sZW5ndGgATBVzZXRfc2hvdWxkX2F1dG9kZXRlY3QATSBzZXRfc2hvdWxkX2NvbnRpbnVlX3dpdGhvdXRfZGF0YQBOHHNldF9zaG91bGRfbWFuYWdlX3VuY29uc3VtZWQATxRzZXRfc2hvdWxkX3NraXBfYm9keQBQIHNldF9zaG91bGRfc3VzcGVuZF9hZnRlcl9oZWFkZXJzAFEcc2hvdWxkX2NvbnRpbnVlX3dpdGhvdXRfZGF0YQBSGHNob3VsZF9tYW5hZ2VfdW5jb25zdW1lZABTEHNob3VsZF9za2lwX2JvZHkAVBxzaG91bGRfc3VzcGVuZF9hZnRlcl9oZWFkZXJzAFUKoLQCQdgDAgJ/BXsCQCACIANPDQAgAS0AACEBIAMgAmsiBUEPTQRAIANBAWsDQCAB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QgBSBEAgBUEQakGBgARJDQEMGQsgA0EBOgAUIANCADcDOCAFQV5IDRgMAwsgAygCICEBIAMoAvgCIAVqQRc6AAAgAygC+AIgBWpBAWogACABajYAACADKAL4AiAFakEFakEANgAAIANBAToAFCADQgA3AzggBUEJaiEFDAILIAMoAiAhASADKAL4AiAFakEYOgAAIAMoAvgCIAVqQQFqIAE2AAAgAygC+AIgBWpBBWogADYAACAFQQlqIQULIAMgAykDOCAvfTcDOEEAIQcMAwsCQCAXRQ0AIDRCAFIEQCAFQXBIDRYgAygCICECIAMoAvgCIAVqIgFBBDoAACABQQVqQQA2AAAgAUEBaiAAIAJqNgAAIAVBCWohBQsgM1ANACAFQXBIDRUgAygCICECIAMoAvgCIAVqIgFBBzoAACABQQVqQQA2AAAgAUEBaiAAIAJqNgAAIAVBCWohBQsgA0EAOgAWIANBADoAFAJAAkAgAy0AUkEBRgRAIAMtABFBAXENAQsgAy0AUA0BIAMtACRBAkcNAkEAIQcMBAtBACEHIAMtACRBAkYNAyADQQ46ACQMAwsgGUUNASAFQXBIDRQgAygCICECIAMoAvgCIAVqIgFBAjoAACABQQVqQQA2AAAgAUEBaiACNgAAIAVBCWohBQwBC0EAIQcgA0EAOgAkDAELQQAhByADLQAkQQJGDQAgA0EBOgAkCyADIAMoAiAgAGo2AiAgACAJSw0NIAsgAGshCyAAIARqIQQgCSAAayEJDAkLIANBAToAFCAFQd//A2tB//97SQ0QAkAgF0UNACA0QgBSBEAgBUFwSA0SIAMoAiAhASADKAL4AiAFaiIAQQQ6AAAgAEEFakEANgAAIABBAWogATYAACAFQQlqIQULIDNQDQAgBUFwSA0RIAMoAiAhASADKAL4AiAFaiIAQQc6AAAgAEEFakEANgAAIABBAWogATYAACAFQQlqIQULIANBADoAFiADQQA6ABQLIAMtAFBBAUcNASAZBEAgBUFwSA0QIAMoAiAhASADKAL4AiAFaiIAQQI6AAAgAEEFakEANgAAIABBAWogATYAACAFQQlqIQULIANBAToAJAtBACEHDAYLQQAhByADQQA6ACQMBQsgAygCACALSwRAQQEhEQwNCyADQQY6ACYgA0ECOgAkIANBu4rAAP0AAAD9CwBsIANBy4rAACgAADYAfAtBgAEhC0EUDAoLIAMoAgAgC0sEQEEBIREMCwsgA0EGOgAmIANBAjoAJCADQaWIwAD9AAAA/QsAbCADQbKIwAApAAA3AHkLQYEBIQtBFQwIC0EAIQcgAy0AJEECRg0AIANBBDoAJAtBASERIAdBAXENByADLQAlQQFxRQ0ACwwGCwALIAMoAvgCQQA6AAAMBQsAC0H5ACELQQ0MAQsgA0EGOgAmIANBAjoAJCADQZaIwAApAAA3AGwgA0GdiMAAKQAANwBzQfsAIQtBDws6APQCQQAhESADIAtqQQA6AAALIAMgAykDGCADKAIgIgutfDcDGAJAIAMtABNFDQAgAygC8AIiAARAIAMoAuwCIAAQWAsgA0IANwLsAiALIBRPDQACQAJAIAlFBEBBASEADAELIAlBARBWIgBFDQEgCUUNACAAIAQgCfwKAAALIAMgADYC7AIgAyAJNgLwAgwBCwALAkACQCAuQgGDUCARcgRAICBFDQEMAgsgBUH6/wNrQf//e0kNACADKAL4AiAFaiIAQQE6AAAgAEEBaiADKAIgNgAAIABBBWogAy0AJjoAACAFQQZqIQULIAMoAvgCIAVqQQA6AAALAkAgAykDWCIuUA0AIC5CAYMhLyAuQoCAAoMhMCAuQgKDITEgLkIEgyEzIC5CCIMhNCAuQhCDITUgLkIggyE2IC5CwACDITcgLkKAAYMhMiAuQoACgyE5IC5CgASDITogLkKACIMhOyAuQoAQgyE8IC5CgCCDIT0gLkKAwACDIT4gLkKAgAGDIT8gLkKAgASDIUAgLkKAgAiDIUEgLkKAgBCDIUIgLkKAgCCDIUMgLkKAgMAAgyFEIC5CgICAAYMhRSAuQoCAgAKDIUYgLkKAgIAEgyFHIC5CgICACIMhOCAuQoCAgBCDIUggLkKAgIAggyFJIC5CgICAwACDIS4gAygCaCECIAMoAvgCIQZBACEEA0ACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkAgBCAGaiIALQAAQQFrDhwAAgMEBQYHCAkKCwwNDg8BEBESExQVFhcYGRobHwtBBiEBIC9QDRsgAiAAQQFqKAAAQQAQACAEQQZqIQQMHQtBEyEBIDBQDRogAiAAQQFqKAAAIABBBWovAAAgAEEHai0AAEEARyAAQQhqLQAAQQBHIABBCWotAABBAEcgAEEKai0AACAAQQtqKQAAuhABIARBE2ohBAwcC0EJIQEgMVANGSACIABBAWooAAAgAEEFaigAABACIARBCWohBAwbC0EJIQEgM1ANGCACIABBAWooAAAgAEEFaigAABADIARBCWohBAwaC0EJIQEgNFANFyACIABBAWooAAAgAEEFaigAABAEIARBCWohBAwZC0EJIQEgNVANFiACIABBAWooAAAgAEEFaigAABAFIARBCWohBAwYC0EJIQEgNlANFSACIABBAWooAAAgAEEFaigAABAGIARBCWohBAwXC0EJIQEgN1ANFCACIABBAWooAAAgAEEFaigAABAHIARBCWohBAwWC0EJIQEgMlANEyACIABBAWooAAAgAEEFaigAABAIIARBCWohBAwVC0EJIQEgOVANEiACIABBAWooAAAgAEEFaigAABAJIARBCWohBAwUC0EJIQEgOlANESACIABBAWooAAAgAEEFaigAABAKIARBCWohBAwTC0EJIQEgO1ANECACIABBAWooAAAgAEEFaigAABALIARBCWohBAwSC0EJIQEgPFANDyACIABBAWooAAAgAEEFaigAABAMIARBCWohBAwRC0EJIQEgPVANDiACIABBAWooAAAgAEEFaigAABANIARBCWohBAwQC0EJIQEgPlANDSACIABBAWooAAAgAEEFaigAABAOIARBCWohBAwPC0EJIQEgP1ANDCACIABBAWooAAAgAEEFaigAABAPIARBCWohBAwOC0EJIQEgQFANCyACIABBAWooAAAgAEEFaigAABAQIARBCWohBAwNC0EJIQEgQVANCiACIABBAWooAAAgAEEFaigAABARIARBCWohBAwMC0EJIQEgQlANCSACIABBAWooAAAgAEEFaigAABASIARBCWohBAwLC0EJIQEgQ1ANCCACIABBAWooAAAgAEEFaigAABATIARBCWohBAwKC0EJIQEgRFANByACIABBAWooAAAgAEEFaigAABAUIARBCWohBAwJC0EJIQEgRVANBiACIABBAWooAAAgAEEFaigAABAVIARBCWohBAwIC0EJIQEgRlANBSACIABBAWooAAAgAEEFaigAABAWIARBCWohBAwHC0EJIQEgR1ANBCAC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AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAEGJhMAACwEBAEGghMAAC+ABAQEAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEAQaGGwAALXgEAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQABAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAAEAAQABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAAAEAQYCIwAALtBBVbmV4cGVjdGVkIGVuZCBvZiBkYXRhVW5leHBlY3RlZCBkYXRhUmVxdWVzdCBsaW5lIHRvbyBsb25nSW52YWxpZCBtZXRob2QgY2hhcmFjdGVySW52YWxpZCBVUkwgY2hhcmFjdGVyUFJJIGlzIG9ubHkgdmFsaWQgd2l0aCBIVFRQLzIuMFVuc3VwcG9ydGVkIEhUVFAgdmVyc2lvbkludmFsaWQgcHJvdG9jb2xJbnZhbGlkIHByb3RvY29sIG5hbWVFeHBlY3RlZCAvIGFmdGVyIHRoZSBwcm90b2NvbCBuYW1lRXhwZWN0ZWQgc3BhY2UgYWZ0ZXIgVVJMRXhwZWN0ZWQgc3BhY2UgYWZ0ZXIgbWV0aG9kUmVxdWVzdCBsaW5lIHRvbyBzaG9ydEV4cGVjdGVkIENSTEZTdGF0dXMgbGluZSB0b28gbG9uZ0ludmFsaWQgSFRUUCByZXNwb25zZSBzdGF0dXNJbnZhbGlkIHN0YXR1cyByZWFzb24gY2hhcmFjdGVyRXhwZWN0ZWQgYSBzcGFjZSBhZnRlciBIVFRQIHJlc3BvbnNlIHN0YXR1c0V4cGVjdGVkIHNwYWNlIGFmdGVyIHByb3RvY29sU3RhdHVzIGxpbmUgdG9vIHNob3J0TWFsZm9ybWVkIEhUVFAvMi4wIHByZWZhY2VVbmV4cGVjdGVkIENvbnRlbnQtTGVuZ3RoIGhlYWRlciBmb3IgYSByZXNwb25zZSB3aXRob3V0IGJvZHlFeHBlY3RlZCBDb250ZW50LUxlbmd0aCBoZWFkZXIgdmFsdWVJbnZhbGlkIENvbnRlbnQtTGVuZ3RoIGhlYWRlckludmFsaWQgZHVwbGljYXRlIENvbnRlbnQtTGVuZ3RoIGhlYWRlclVuZXhwZWN0ZWQgQ29udGVudC1MZW5ndGggaGVhZGVyIHdoZW4gVHJhbnNmZXItRW5jb2RpbmcgaGVhZGVyIGlzIHByZXNlbnRVbmV4cGVjdGVkIFRyYW5zZmVyLUVuY29kaW5nIGhlYWRlciBmb3IgYSByZXNwb25zZSB3aXRob3V0IGJvZHlFeHBlY3RlZCBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgdmFsdWVUaGUgdmFsdWUgImNodW5rZWQiIGluIHRoZSBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgbXVzdCBiZSB0aGUgbGFzdCBwcm92aWRlZCBhbmQgY2FuIGJlIHByb3ZpZGVkIG9ubHkgb25jZVRoZSB2YWx1ZSAiY2h1bmtlZCIgaW4gdGhlIFRyYW5zZmVyLUVuY29kaW5nIGhlYWRlciBtdXN0IGJlIHRoZSBsYXN0IHByb3ZpZGVkVW5leHBlY3RlZCBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgd2hlbiBDb250ZW50LUxlbmd0aCBoZWFkZXIgaXMgcHJlc2VudEV4cGVjdGVkIENvbm5lY3Rpb24gaGVhZGVyIHZhbHVlSW52YWxpZCBDb25uZWN0aW9uIGhlYWRlciB2YWx1ZUV4cGVjdGVkIFRyYWlsZXIgaGVhZGVyIHZhbHVlRXhwZWN0ZWQgVXBncmFkZSBoZWFkZXIgdmFsdWVJbnZhbGlkIFVwZ3JhZGUgaGVhZGVyIHZhbHVlSW52YWxpZCBoZWFkZXIgZmllbGQgbmFtZSBjaGFyYWN0ZXJJbnZhbGlkIGhlYWRlciBmaWVsZCB2YWx1ZSBjaGFyYWN0ZXJIZWFkZXIgbGluZSB0b28gbG9uZ01pc3NpbmcgQ29ubmVjdGlvbiBoZWFkZXIgc2V0IHRvICJ1cGdyYWRlIiB3aGVuIHVzaW5nIHRoZSBVcGdyYWRlIGhlYWRlclRyYWlsZXJzIGFyZSBub3QgYWxsb3dlZCB3aGVuIG5vdCB1c2luZyBjaHVua2VkIHRyYW5zZmVyIGVuY29kaW5nVW5leHBlY3RlZCBjb250ZW50IGZvciB0aGUgcmVxdWVzdCAoR0VUIG9yIEhFQUQpVHJhbnNmZXItRW5jb2RpbmcgbGFzdCBoZWFkZXIgdmFsdWUgbXVzdCBiZSAiY2h1bmtlZCIgaWYgdGhlIGhlYWRlciBpcyBwcmVzZW50Q2h1bmsgaGVhZGVyIHRvbyBsb25nSW52YWxpZCBjaHVuayBsZW5ndGggY2hhcmFjdGVySW52YWxpZCBjaHVuayBsZW5ndGggc2l6ZUV4cGVjdGVkIGNodW5rIGV4dGVuc2lvbiBuYW1lSW52YWxpZCBjaHVuayBleHRlbnNpb24gbmFtZSBjaGFyYWN0ZXJFeHBlY3RlZCBjbG9zaW5nIHF1b3RlIGZvciBjaHVuayBleHRlbnNpb24gdmFsdWVJbnZhbGlkIGNodW5rIGV4dGVuc2lvbiBxdW90ZWQgdmFsdWUgY2hhcmFjdGVyRXhwZWN0ZWQgY2h1bmsgZXh0ZW5zaW9uIHZhbHVlSW52YWxpZCBjaHVuayBleHRlbnNpb24gdmFsdWUgY2hhcmFjdGVySW52YWxpZCBjaHVuayBleHRlbnNpb24gY2hhcmFjdGVyIGFmdGVyIHZhbHVlRXhwZWN0ZWQgQ1JMRiBhZnRlciBjaHVuayBkYXRhSW52YWxpZCB0cmFpbGVyIGZpZWxkIG5hbWUgY2hhcmFjdGVySW52YWxpZCB0cmFpbGVyIGZpZWxkIHZhbHVlIGNoYXJhY3RlclRyYWlsZXIgbGluZSB0b28gbG9uZ0ludmFsaWQgc3RhdGU=",
+        "base64"
+      )
+    );
+    var textEncoder2 = new TextEncoder();
+    var textDecoder = new TextDecoder();
+    function log(logger, raw) {
+      const len = Number(BigInt.asUintN(32, raw));
+      const ptr = Number(raw >> 32n);
+      logger(textDecoder.decode(new Uint8Array(this.memory.buffer, ptr, len)));
+    }
+    function alloc(len) {
+      return this.alloc(len) >>> 0;
+    }
+    function dealloc(ptr, len) {
+      return this.dealloc(ptr, len);
+    }
+    function create2() {
+      return this.create() >>> 0;
+    }
+    function destroy(parser) {
+      this.destroy(parser);
+    }
+    function parse(parser, data, limit) {
+      return this.parse(parser, data, limit) >>> 0;
+    }
+    function fail(parser, code, description) {
+      const len = description.length;
+      const ptr = this.alloc(len);
+      const buffer = new Uint8Array(this.memory.buffer, ptr, len);
+      textEncoder2.encodeInto(description, buffer);
+      this.fail(parser, code, ptr, len);
+      this.dealloc(ptr, len);
+    }
+    function hasDebug() {
+      return this.milo_has_debug() !== 0;
+    }
+    var Errors = Object.freeze({
+      NONE: 0,
+      USER: 1,
+      CALLBACK_ERROR: 2,
+      UNEXPECTED_STATE: 3,
+      UNEXPECTED_DATA: 4,
+      UNEXPECTED_EOF: 5,
+      UNEXPECTED_CHARACTER: 6,
+      UNEXPECTED_CONTENT_LENGTH: 7,
+      UNEXPECTED_TRANSFER_ENCODING: 8,
+      UNEXPECTED_CONTENT: 9,
+      UNEXPECTED_TRAILERS: 10,
+      INVALID_VERSION: 11,
+      INVALID_STATUS: 12,
+      INVALID_CONTENT_LENGTH: 13,
+      INVALID_TRANSFER_ENCODING: 14,
+      INVALID_CHUNK_SIZE: 15,
+      MISSING_CONNECTION_UPGRADE: 16,
+      UNSUPPORTED_HTTP_VERSION: 17,
+      0: "NONE",
+      1: "USER",
+      2: "CALLBACK_ERROR",
+      3: "UNEXPECTED_STATE",
+      4: "UNEXPECTED_DATA",
+      5: "UNEXPECTED_EOF",
+      6: "UNEXPECTED_CHARACTER",
+      7: "UNEXPECTED_CONTENT_LENGTH",
+      8: "UNEXPECTED_TRANSFER_ENCODING",
+      9: "UNEXPECTED_CONTENT",
+      10: "UNEXPECTED_TRAILERS",
+      11: "INVALID_VERSION",
+      12: "INVALID_STATUS",
+      13: "INVALID_CONTENT_LENGTH",
+      14: "INVALID_TRANSFER_ENCODING",
+      15: "INVALID_CHUNK_SIZE",
+      16: "MISSING_CONNECTION_UPGRADE",
+      17: "UNSUPPORTED_HTTP_VERSION"
+    });
+    var Methods = Object.freeze({
+      OTHER: 0,
+      GET: 1,
+      HEAD: 2,
+      POST: 3,
+      PUT: 4,
+      DELETE: 5,
+      CONNECT: 6,
+      OPTIONS: 7,
+      TRACE: 8,
+      PATCH: 9,
+      PRI: 10,
+      0: "OTHER",
+      1: "GET",
+      2: "HEAD",
+      3: "POST",
+      4: "PUT",
+      5: "DELETE",
+      6: "CONNECT",
+      7: "OPTIONS",
+      8: "TRACE",
+      9: "PATCH",
+      10: "PRI"
+    });
+    var Callbacks = Object.freeze({
+      ON_ERROR: 0,
+      ON_FINISH: 1,
+      ON_MESSAGE_START: 2,
+      ON_MESSAGE_COMPLETE: 3,
+      ON_REQUEST: 4,
+      ON_RESPONSE: 5,
+      ON_RESET: 6,
+      ON_METHOD: 7,
+      ON_URL: 8,
+      ON_PROTOCOL: 9,
+      ON_VERSION: 10,
+      ON_STATUS: 11,
+      ON_REASON: 12,
+      ON_HEADER_NAME: 13,
+      ON_HEADER_VALUE: 14,
+      ON_HEADERS: 15,
+      ON_CONNECT: 16,
+      ON_UPGRADE: 17,
+      ON_CHUNK_LENGTH: 18,
+      ON_CHUNK_EXTENSION_NAME: 19,
+      ON_CHUNK_EXTENSION_VALUE: 20,
+      ON_CHUNK: 21,
+      ON_BODY: 22,
+      ON_DATA: 23,
+      ON_TRAILER_NAME: 24,
+      ON_TRAILER_VALUE: 25,
+      ON_TRAILERS: 26,
+      ON_STATE_CHANGE: 27,
+      0: "ON_ERROR",
+      1: "ON_FINISH",
+      2: "ON_MESSAGE_START",
+      3: "ON_MESSAGE_COMPLETE",
+      4: "ON_REQUEST",
+      5: "ON_RESPONSE",
+      6: "ON_RESET",
+      7: "ON_METHOD",
+      8: "ON_URL",
+      9: "ON_PROTOCOL",
+      10: "ON_VERSION",
+      11: "ON_STATUS",
+      12: "ON_REASON",
+      13: "ON_HEADER_NAME",
+      14: "ON_HEADER_VALUE",
+      15: "ON_HEADERS",
+      16: "ON_CONNECT",
+      17: "ON_UPGRADE",
+      18: "ON_CHUNK_LENGTH",
+      19: "ON_CHUNK_EXTENSION_NAME",
+      20: "ON_CHUNK_EXTENSION_VALUE",
+      21: "ON_CHUNK",
+      22: "ON_BODY",
+      23: "ON_DATA",
+      24: "ON_TRAILER_NAME",
+      25: "ON_TRAILER_VALUE",
+      26: "ON_TRAILERS",
+      27: "ON_STATE_CHANGE"
+    });
+    var CallbackActives = Object.freeze({
+      NONE: 0n,
+      ON_ERROR: 1n,
+      ON_FINISH: 2n,
+      ON_MESSAGE_START: 4n,
+      ON_MESSAGE_COMPLETE: 8n,
+      ON_REQUEST: 16n,
+      ON_RESPONSE: 32n,
+      ON_RESET: 64n,
+      ON_METHOD: 128n,
+      ON_URL: 256n,
+      ON_PROTOCOL: 512n,
+      ON_VERSION: 1024n,
+      ON_STATUS: 2048n,
+      ON_REASON: 4096n,
+      ON_HEADER_NAME: 8192n,
+      ON_HEADER_VALUE: 16384n,
+      ON_HEADERS: 32768n,
+      ON_CONNECT: 65536n,
+      ON_UPGRADE: 131072n,
+      ON_CHUNK_LENGTH: 262144n,
+      ON_CHUNK_EXTENSION_NAME: 524288n,
+      ON_CHUNK_EXTENSION_VALUE: 1048576n,
+      ON_CHUNK: 2097152n,
+      ON_BODY: 4194304n,
+      ON_DATA: 8388608n,
+      ON_TRAILER_NAME: 16777216n,
+      ON_TRAILER_VALUE: 33554432n,
+      ON_TRAILERS: 67108864n,
+      ON_STATE_CHANGE: 134217728n,
+      ALL: 268435455n,
+      0n: "NONE",
+      1n: "ON_ERROR",
+      2n: "ON_FINISH",
+      4n: "ON_MESSAGE_START",
+      8n: "ON_MESSAGE_COMPLETE",
+      16n: "ON_REQUEST",
+      32n: "ON_RESPONSE",
+      64n: "ON_RESET",
+      128n: "ON_METHOD",
+      256n: "ON_URL",
+      512n: "ON_PROTOCOL",
+      1024n: "ON_VERSION",
+      2048n: "ON_STATUS",
+      4096n: "ON_REASON",
+      8192n: "ON_HEADER_NAME",
+      16384n: "ON_HEADER_VALUE",
+      32768n: "ON_HEADERS",
+      65536n: "ON_CONNECT",
+      131072n: "ON_UPGRADE",
+      262144n: "ON_CHUNK_LENGTH",
+      524288n: "ON_CHUNK_EXTENSION_NAME",
+      1048576n: "ON_CHUNK_EXTENSION_VALUE",
+      2097152n: "ON_CHUNK",
+      4194304n: "ON_BODY",
+      8388608n: "ON_DATA",
+      16777216n: "ON_TRAILER_NAME",
+      33554432n: "ON_TRAILER_VALUE",
+      67108864n: "ON_TRAILERS",
+      134217728n: "ON_STATE_CHANGE",
+      268435455n: "ALL"
+    });
+    var Events = Object.freeze({
+      END: 0,
+      ERROR: 1,
+      FINISH: 2,
+      MESSAGE_START: 3,
+      MESSAGE_COMPLETE: 4,
+      REQUEST: 5,
+      RESPONSE: 6,
+      RESET: 7,
+      METHOD: 8,
+      URL: 9,
+      PROTOCOL: 10,
+      VERSION: 11,
+      STATUS: 12,
+      REASON: 13,
+      HEADER_NAME: 14,
+      HEADER_VALUE: 15,
+      HEADERS: 16,
+      CONNECT: 17,
+      UPGRADE: 18,
+      CHUNK_LENGTH: 19,
+      CHUNK_EXTENSION_NAME: 20,
+      CHUNK_EXTENSION_VALUE: 21,
+      CHUNK: 22,
+      BODY: 23,
+      DATA: 24,
+      TRAILER_NAME: 25,
+      TRAILER_VALUE: 26,
+      TRAILERS: 27,
+      STATE_CHANGE: 28,
+      0: "END",
+      1: "ERROR",
+      2: "FINISH",
+      3: "MESSAGE_START",
+      4: "MESSAGE_COMPLETE",
+      5: "REQUEST",
+      6: "RESPONSE",
+      7: "RESET",
+      8: "METHOD",
+      9: "URL",
+      10: "PROTOCOL",
+      11: "VERSION",
+      12: "STATUS",
+      13: "REASON",
+      14: "HEADER_NAME",
+      15: "HEADER_VALUE",
+      16: "HEADERS",
+      17: "CONNECT",
+      18: "UPGRADE",
+      19: "CHUNK_LENGTH",
+      20: "CHUNK_EXTENSION_NAME",
+      21: "CHUNK_EXTENSION_VALUE",
+      22: "CHUNK",
+      23: "BODY",
+      24: "DATA",
+      25: "TRAILER_NAME",
+      26: "TRAILER_VALUE",
+      27: "TRAILERS",
+      28: "STATE_CHANGE"
+    });
+    var EventActives = Object.freeze({
+      NONE: 0n,
+      ON_ERROR: 1n,
+      ON_FINISH: 2n,
+      ON_MESSAGE_START: 4n,
+      ON_MESSAGE_COMPLETE: 8n,
+      ON_REQUEST: 16n,
+      ON_RESPONSE: 32n,
+      ON_RESET: 64n,
+      ON_METHOD: 128n,
+      ON_URL: 256n,
+      ON_PROTOCOL: 512n,
+      ON_VERSION: 1024n,
+      ON_STATUS: 2048n,
+      ON_REASON: 4096n,
+      ON_HEADER_NAME: 8192n,
+      ON_HEADER_VALUE: 16384n,
+      ON_HEADERS: 32768n,
+      ON_CONNECT: 65536n,
+      ON_UPGRADE: 131072n,
+      ON_CHUNK_LENGTH: 262144n,
+      ON_CHUNK_EXTENSION_NAME: 524288n,
+      ON_CHUNK_EXTENSION_VALUE: 1048576n,
+      ON_CHUNK: 2097152n,
+      ON_BODY: 4194304n,
+      ON_DATA: 8388608n,
+      ON_TRAILER_NAME: 16777216n,
+      ON_TRAILER_VALUE: 33554432n,
+      ON_TRAILERS: 67108864n,
+      ON_STATE_CHANGE: 134217728n,
+      ALL: 268435455n,
+      0n: "NONE",
+      1n: "ON_ERROR",
+      2n: "ON_FINISH",
+      4n: "ON_MESSAGE_START",
+      8n: "ON_MESSAGE_COMPLETE",
+      16n: "ON_REQUEST",
+      32n: "ON_RESPONSE",
+      64n: "ON_RESET",
+      128n: "ON_METHOD",
+      256n: "ON_URL",
+      512n: "ON_PROTOCOL",
+      1024n: "ON_VERSION",
+      2048n: "ON_STATUS",
+      4096n: "ON_REASON",
+      8192n: "ON_HEADER_NAME",
+      16384n: "ON_HEADER_VALUE",
+      32768n: "ON_HEADERS",
+      65536n: "ON_CONNECT",
+      131072n: "ON_UPGRADE",
+      262144n: "ON_CHUNK_LENGTH",
+      524288n: "ON_CHUNK_EXTENSION_NAME",
+      1048576n: "ON_CHUNK_EXTENSION_VALUE",
+      2097152n: "ON_CHUNK",
+      4194304n: "ON_BODY",
+      8388608n: "ON_DATA",
+      16777216n: "ON_TRAILER_NAME",
+      33554432n: "ON_TRAILER_VALUE",
+      67108864n: "ON_TRAILERS",
+      134217728n: "ON_STATE_CHANGE",
+      268435455n: "ALL"
+    });
+    var States = Object.freeze({
+      START: 0,
+      FINISH: 1,
+      ERROR: 2,
+      REQUEST_LINE: 3,
+      STATUS_LINE: 4,
+      HTTP2_PREFACE: 5,
+      HEADER: 6,
+      BODY_DECISION: 7,
+      BODY_VIA_CONTENT_LENGTH: 8,
+      BODY_WITH_NO_LENGTH: 9,
+      CHUNK_HEADER: 10,
+      CHUNK_EXTENSIONS: 11,
+      CHUNK_DATA: 12,
+      TRAILER: 13,
+      TUNNEL: 14,
+      0: "START",
+      1: "FINISH",
+      2: "ERROR",
+      3: "REQUEST_LINE",
+      4: "STATUS_LINE",
+      5: "HTTP2_PREFACE",
+      6: "HEADER",
+      7: "BODY_DECISION",
+      8: "BODY_VIA_CONTENT_LENGTH",
+      9: "BODY_WITH_NO_LENGTH",
+      10: "CHUNK_HEADER",
+      11: "CHUNK_EXTENSIONS",
+      12: "CHUNK_DATA",
+      13: "TRAILER",
+      14: "TUNNEL"
+    });
+    var ParserFields = Object.freeze({
+      MAX_START_LINE_LENGTH: 0,
+      MAX_HEADER_LENGTH: 4,
+      MAX_BODY_PAYLOAD: 8,
+      AUTODETECT: 16,
+      IS_REQUEST: 17,
+      SUSPEND_AFTER_HEADERS: 18,
+      MANAGE_UNCONSUMED: 19,
+      CONTINUE_WITHOUT_DATA: 20,
+      IS_CONNECT: 21,
+      SKIP_BODY: 22,
+      DEBUG: 23,
+      PARSED: 24,
+      POSITION: 32,
+      STATE: 36,
+      PAUSED: 37,
+      ERROR_CODE: 38,
+      CONTENT_LENGTH: 40,
+      CHUNK_SIZE: 48,
+      REMAINING_CONTENT_LENGTH: 56,
+      REMAINING_CHUNK_SIZE: 64,
+      STATUS: 72,
+      METHOD: 76,
+      HAS_CONTENT_LENGTH: 77,
+      HAS_TRANSFER_ENCODING: 78,
+      HAS_CHUNKED_TRANSFER_ENCODING: 79,
+      HAS_CONNECTION_CLOSE: 80,
+      HAS_CONNECTION_UPGRADE: 81,
+      HAS_UPGRADE: 82,
+      HAS_TRAILERS: 83,
+      ACTIVE_CALLBACKS: 88,
+      ACTIVE_EVENTS: 96,
+      PTR: 104,
+      ERROR_DESCRIPTION: 108,
+      UNCONSUMED: 364,
+      UNCONSUMED_LEN: 368,
+      ERROR_DESCRIPTION_LEN: 372,
+      EVENTS: 376,
+      0: "MAX_START_LINE_LENGTH",
+      4: "MAX_HEADER_LENGTH",
+      8: "MAX_BODY_PAYLOAD",
+      16: "AUTODETECT",
+      17: "IS_REQUEST",
+      18: "SUSPEND_AFTER_HEADERS",
+      19: "MANAGE_UNCONSUMED",
+      20: "CONTINUE_WITHOUT_DATA",
+      21: "IS_CONNECT",
+      22: "SKIP_BODY",
+      23: "DEBUG",
+      24: "PARSED",
+      32: "POSITION",
+      36: "STATE",
+      37: "PAUSED",
+      38: "ERROR_CODE",
+      40: "CONTENT_LENGTH",
+      48: "CHUNK_SIZE",
+      56: "REMAINING_CONTENT_LENGTH",
+      64: "REMAINING_CHUNK_SIZE",
+      72: "STATUS",
+      76: "METHOD",
+      77: "HAS_CONTENT_LENGTH",
+      78: "HAS_TRANSFER_ENCODING",
+      79: "HAS_CHUNKED_TRANSFER_ENCODING",
+      80: "HAS_CONNECTION_CLOSE",
+      81: "HAS_CONNECTION_UPGRADE",
+      82: "HAS_UPGRADE",
+      83: "HAS_TRAILERS",
+      88: "ACTIVE_CALLBACKS",
+      96: "ACTIVE_EVENTS",
+      104: "PTR",
+      108: "ERROR_DESCRIPTION",
+      364: "UNCONSUMED",
+      368: "UNCONSUMED_LEN",
+      372: "ERROR_DESCRIPTION_LEN",
+      376: "EVENTS"
+    });
+    function isAutodetect(parser) {
+      return this.is_autodetect(parser) !== 0;
+    }
+    function isRequest2(parser) {
+      return this.is_request(parser) !== 0;
+    }
+    function isPaused(parser) {
+      return this.is_paused(parser) !== 0;
+    }
+    function shouldManageUnconsumed(parser) {
+      return this.should_manage_unconsumed(parser) !== 0;
+    }
+    function shouldSuspendAfterHeaders(parser) {
+      return this.should_suspend_after_headers(parser) !== 0;
+    }
+    function getMaxStartLineLength(parser) {
+      return this.get_max_start_line_length(parser) >>> 0;
+    }
+    function getMaxHeaderLength(parser) {
+      return this.get_max_header_length(parser) >>> 0;
+    }
+    function getMaxBodyPayload(parser) {
+      return BigInt.asUintN(64, this.get_max_body_payload(parser));
+    }
+    function shouldContinueWithoutData(parser) {
+      return this.should_continue_without_data(parser) !== 0;
+    }
+    function isConnect(parser) {
+      return this.is_connect(parser) !== 0;
+    }
+    function isDebug(parser) {
+      return this.is_debug(parser) !== 0;
+    }
+    function shouldSkipBody(parser) {
+      return this.should_skip_body(parser) !== 0;
+    }
+    function getState(parser) {
+      return this.get_state(parser) >>> 0;
+    }
+    function getPosition(parser) {
+      return this.get_position(parser) >>> 0;
+    }
+    function getParsed(parser) {
+      return BigInt.asUintN(64, this.get_parsed(parser));
+    }
+    function getErrorCode(parser) {
+      return this.get_error_code(parser) >>> 0;
+    }
+    function getMethod(parser) {
+      return this.get_method(parser) >>> 0;
+    }
+    function getStatus(parser) {
+      return this.get_status(parser) >>> 0;
+    }
+    function hasConnectionClose(parser) {
+      return this.has_connection_close(parser) !== 0;
+    }
+    function hasConnectionUpgrade(parser) {
+      return this.has_connection_upgrade(parser) !== 0;
+    }
+    function getContentLength(parser) {
+      return BigInt.asUintN(64, this.get_content_length(parser));
+    }
+    function getChunkSize(parser) {
+      return BigInt.asUintN(64, this.get_chunk_size(parser));
+    }
+    function getRemainingContentLength(parser) {
+      return BigInt.asUintN(64, this.get_remaining_content_length(parser));
+    }
+    function getRemainingChunkSize(parser) {
+      return BigInt.asUintN(64, this.get_remaining_chunk_size(parser));
+    }
+    function hasContentLength(parser) {
+      return this.has_content_length(parser) !== 0;
+    }
+    function hasTransferEncoding(parser) {
+      return this.has_transfer_encoding(parser) !== 0;
+    }
+    function hasChunkedTransferEncoding(parser) {
+      return this.has_chunked_transfer_encoding(parser) !== 0;
+    }
+    function hasUpgrade(parser) {
+      return this.has_upgrade(parser) !== 0;
+    }
+    function hasTrailers(parser) {
+      return this.has_trailers(parser) !== 0;
+    }
+    function getErrorDescription(parser) {
+      const raw = this.get_error_description_raw(parser);
+      const len = Number(BigInt.asUintN(32, raw));
+      const ptr = Number(raw >> 32n);
+      return textDecoder.decode(new Uint8Array(this.memory.buffer, ptr, len));
+    }
+    function setShouldAutodetect(parser, value) {
+      this.set_should_autodetect(parser, value);
+    }
+    function setShouldContinueWithoutData(parser, value) {
+      this.set_should_continue_without_data(parser, value);
+    }
+    function setIsRequest(parser, value) {
+      this.set_is_request(parser, value);
+    }
+    function setIsConnect(parser, value) {
+      this.set_is_connect(parser, value);
+    }
+    function setDebug(parser, value) {
+      this.set_debug(parser, value);
+    }
+    function setShouldManageUnconsumed(parser, value) {
+      this.set_should_manage_unconsumed(parser, value);
+    }
+    function setShouldSuspendAfterHeaders(parser, value) {
+      this.set_should_suspend_after_headers(parser, value);
+    }
+    function setMaxStartLineLength(parser, value) {
+      this.set_max_start_line_length(parser, value);
+    }
+    function setMaxHeaderLength(parser, value) {
+      this.set_max_header_length(parser, value);
+    }
+    function setMaxBodyPayload(parser, value) {
+      this.set_max_body_payload(parser, value);
+    }
+    function setShouldSkipBody(parser, value) {
+      this.set_should_skip_body(parser, value);
+    }
+    function setActiveCallbacks(parser, value) {
+      this.set_active_callbacks(parser, value);
+    }
+    function setActiveEvents(parser, value) {
+      this.set_active_events(parser, value);
+    }
+    function simpleCreate(spans, create3) {
+      const parser = create3();
+      spans[parser] = [];
+      this.setActiveCallbacks(parser, this.CALLBACK_ACTIVE_ALL);
+      return parser;
+    }
+    function simpleDestroy(spans, destroy2, parser) {
+      spans[parser] = void 0;
+      destroy2(parser);
+    }
+    function noop2() {
+    }
+    function setup(env = {}) {
+      let { logger: logOption, ...instanceEnvironment } = env;
+      let logger = noop2;
+      const context = {};
+      if (logOption) {
+        if (typeof logOption !== "function") {
+          logOption = console.log;
+        }
+        logger = log.bind(context, logOption);
+      }
+      const instance = new WebAssembly.Instance(wasmModule, {
+        env: {
+          logger,
+          on_error: noop2,
+          on_finish: noop2,
+          on_message_start: noop2,
+          on_message_complete: noop2,
+          on_request: noop2,
+          on_response: noop2,
+          on_reset: noop2,
+          on_method: noop2,
+          on_url: noop2,
+          on_protocol: noop2,
+          on_version: noop2,
+          on_status: noop2,
+          on_reason: noop2,
+          on_header_name: noop2,
+          on_header_value: noop2,
+          on_headers: noop2,
+          on_connect: noop2,
+          on_upgrade: noop2,
+          on_chunk_length: noop2,
+          on_chunk_extension_name: noop2,
+          on_chunk_extension_value: noop2,
+          on_chunk: noop2,
+          on_body: noop2,
+          on_data: noop2,
+          on_trailer_name: noop2,
+          on_trailer_value: noop2,
+          on_trailers: noop2,
+          on_state_change: noop2,
+          ...instanceEnvironment
+        }
+      });
+      const wasm = instance.exports;
+      context.memory = wasm.memory;
+      const milo = {
+        version: {
+          raw: "0.9.0",
+          major: 0,
+          minor: 9,
+          patch: 0,
+          prerelease: ""
+        },
+        METHOD_OTHER: 0,
+        METHOD_GET: 1,
+        METHOD_HEAD: 2,
+        METHOD_POST: 3,
+        METHOD_PUT: 4,
+        METHOD_DELETE: 5,
+        METHOD_CONNECT: 6,
+        METHOD_OPTIONS: 7,
+        METHOD_TRACE: 8,
+        METHOD_PATCH: 9,
+        METHOD_PRI: 10,
+        CALLBACK_ON_ERROR: 0,
+        CALLBACK_ON_FINISH: 1,
+        CALLBACK_ON_MESSAGE_START: 2,
+        CALLBACK_ON_MESSAGE_COMPLETE: 3,
+        CALLBACK_ON_REQUEST: 4,
+        CALLBACK_ON_RESPONSE: 5,
+        CALLBACK_ON_RESET: 6,
+        CALLBACK_ON_METHOD: 7,
+        CALLBACK_ON_URL: 8,
+        CALLBACK_ON_PROTOCOL: 9,
+        CALLBACK_ON_VERSION: 10,
+        CALLBACK_ON_STATUS: 11,
+        CALLBACK_ON_REASON: 12,
+        CALLBACK_ON_HEADER_NAME: 13,
+        CALLBACK_ON_HEADER_VALUE: 14,
+        CALLBACK_ON_HEADERS: 15,
+        CALLBACK_ON_CONNECT: 16,
+        CALLBACK_ON_UPGRADE: 17,
+        CALLBACK_ON_CHUNK_LENGTH: 18,
+        CALLBACK_ON_CHUNK_EXTENSION_NAME: 19,
+        CALLBACK_ON_CHUNK_EXTENSION_VALUE: 20,
+        CALLBACK_ON_CHUNK: 21,
+        CALLBACK_ON_BODY: 22,
+        CALLBACK_ON_DATA: 23,
+        CALLBACK_ON_TRAILER_NAME: 24,
+        CALLBACK_ON_TRAILER_VALUE: 25,
+        CALLBACK_ON_TRAILERS: 26,
+        CALLBACK_ON_STATE_CHANGE: 27,
+        EVENT_END: 0,
+        EVENT_ERROR: 1,
+        EVENT_FINISH: 2,
+        EVENT_MESSAGE_START: 3,
+        EVENT_MESSAGE_COMPLETE: 4,
+        EVENT_REQUEST: 5,
+        EVENT_RESPONSE: 6,
+        EVENT_RESET: 7,
+        EVENT_METHOD: 8,
+        EVENT_URL: 9,
+        EVENT_PROTOCOL: 10,
+        EVENT_VERSION: 11,
+        EVENT_STATUS: 12,
+        EVENT_REASON: 13,
+        EVENT_HEADER_NAME: 14,
+        EVENT_HEADER_VALUE: 15,
+        EVENT_HEADERS: 16,
+        EVENT_CONNECT: 17,
+        EVENT_UPGRADE: 18,
+        EVENT_CHUNK_LENGTH: 19,
+        EVENT_CHUNK_EXTENSION_NAME: 20,
+        EVENT_CHUNK_EXTENSION_VALUE: 21,
+        EVENT_CHUNK: 22,
+        EVENT_BODY: 23,
+        EVENT_DATA: 24,
+        EVENT_TRAILER_NAME: 25,
+        EVENT_TRAILER_VALUE: 26,
+        EVENT_TRAILERS: 27,
+        EVENT_STATE_CHANGE: 28,
+        CALLBACK_ACTIVE_NONE: 0n,
+        EVENT_ACTIVE_NONE: 0n,
+        CALLBACK_ACTIVE_ON_ERROR: 1n,
+        EVENT_ACTIVE_ON_ERROR: 1n,
+        CALLBACK_ACTIVE_ON_FINISH: 2n,
+        EVENT_ACTIVE_ON_FINISH: 2n,
+        CALLBACK_ACTIVE_ON_MESSAGE_START: 4n,
+        EVENT_ACTIVE_ON_MESSAGE_START: 4n,
+        CALLBACK_ACTIVE_ON_MESSAGE_COMPLETE: 8n,
+        EVENT_ACTIVE_ON_MESSAGE_COMPLETE: 8n,
+        CALLBACK_ACTIVE_ON_REQUEST: 16n,
+        EVENT_ACTIVE_ON_REQUEST: 16n,
+        CALLBACK_ACTIVE_ON_RESPONSE: 32n,
+        EVENT_ACTIVE_ON_RESPONSE: 32n,
+        CALLBACK_ACTIVE_ON_RESET: 64n,
+        EVENT_ACTIVE_ON_RESET: 64n,
+        CALLBACK_ACTIVE_ON_METHOD: 128n,
+        EVENT_ACTIVE_ON_METHOD: 128n,
+        CALLBACK_ACTIVE_ON_URL: 256n,
+        EVENT_ACTIVE_ON_URL: 256n,
+        CALLBACK_ACTIVE_ON_PROTOCOL: 512n,
+        EVENT_ACTIVE_ON_PROTOCOL: 512n,
+        CALLBACK_ACTIVE_ON_VERSION: 1024n,
+        EVENT_ACTIVE_ON_VERSION: 1024n,
+        CALLBACK_ACTIVE_ON_STATUS: 2048n,
+        EVENT_ACTIVE_ON_STATUS: 2048n,
+        CALLBACK_ACTIVE_ON_REASON: 4096n,
+        EVENT_ACTIVE_ON_REASON: 4096n,
+        CALLBACK_ACTIVE_ON_HEADER_NAME: 8192n,
+        EVENT_ACTIVE_ON_HEADER_NAME: 8192n,
+        CALLBACK_ACTIVE_ON_HEADER_VALUE: 16384n,
+        EVENT_ACTIVE_ON_HEADER_VALUE: 16384n,
+        CALLBACK_ACTIVE_ON_HEADERS: 32768n,
+        EVENT_ACTIVE_ON_HEADERS: 32768n,
+        CALLBACK_ACTIVE_ON_CONNECT: 65536n,
+        EVENT_ACTIVE_ON_CONNECT: 65536n,
+        CALLBACK_ACTIVE_ON_UPGRADE: 131072n,
+        EVENT_ACTIVE_ON_UPGRADE: 131072n,
+        CALLBACK_ACTIVE_ON_CHUNK_LENGTH: 262144n,
+        EVENT_ACTIVE_ON_CHUNK_LENGTH: 262144n,
+        CALLBACK_ACTIVE_ON_CHUNK_EXTENSION_NAME: 524288n,
+        EVENT_ACTIVE_ON_CHUNK_EXTENSION_NAME: 524288n,
+        CALLBACK_ACTIVE_ON_CHUNK_EXTENSION_VALUE: 1048576n,
+        EVENT_ACTIVE_ON_CHUNK_EXTENSION_VALUE: 1048576n,
+        CALLBACK_ACTIVE_ON_CHUNK: 2097152n,
+        EVENT_ACTIVE_ON_CHUNK: 2097152n,
+        CALLBACK_ACTIVE_ON_BODY: 4194304n,
+        EVENT_ACTIVE_ON_BODY: 4194304n,
+        CALLBACK_ACTIVE_ON_DATA: 8388608n,
+        EVENT_ACTIVE_ON_DATA: 8388608n,
+        CALLBACK_ACTIVE_ON_TRAILER_NAME: 16777216n,
+        EVENT_ACTIVE_ON_TRAILER_NAME: 16777216n,
+        CALLBACK_ACTIVE_ON_TRAILER_VALUE: 33554432n,
+        EVENT_ACTIVE_ON_TRAILER_VALUE: 33554432n,
+        CALLBACK_ACTIVE_ON_TRAILERS: 67108864n,
+        EVENT_ACTIVE_ON_TRAILERS: 67108864n,
+        CALLBACK_ACTIVE_ON_STATE_CHANGE: 134217728n,
+        EVENT_ACTIVE_ON_STATE_CHANGE: 134217728n,
+        CALLBACK_ACTIVE_ALL: 268435455n,
+        EVENT_ACTIVE_ALL: 268435455n,
+        ERROR_NONE: 0,
+        ERROR_USER: 1,
+        ERROR_CALLBACK_ERROR: 2,
+        ERROR_UNEXPECTED_STATE: 3,
+        ERROR_UNEXPECTED_DATA: 4,
+        ERROR_UNEXPECTED_EOF: 5,
+        ERROR_UNEXPECTED_CHARACTER: 6,
+        ERROR_UNEXPECTED_CONTENT_LENGTH: 7,
+        ERROR_UNEXPECTED_TRANSFER_ENCODING: 8,
+        ERROR_UNEXPECTED_CONTENT: 9,
+        ERROR_UNEXPECTED_TRAILERS: 10,
+        ERROR_INVALID_VERSION: 11,
+        ERROR_INVALID_STATUS: 12,
+        ERROR_INVALID_CONTENT_LENGTH: 13,
+        ERROR_INVALID_TRANSFER_ENCODING: 14,
+        ERROR_INVALID_CHUNK_SIZE: 15,
+        ERROR_MISSING_CONNECTION_UPGRADE: 16,
+        ERROR_UNSUPPORTED_HTTP_VERSION: 17,
+        STATE_START: 0,
+        STATE_FINISH: 1,
+        STATE_ERROR: 2,
+        STATE_REQUEST_LINE: 3,
+        STATE_STATUS_LINE: 4,
+        STATE_HTTP2_PREFACE: 5,
+        STATE_HEADER: 6,
+        STATE_BODY_DECISION: 7,
+        STATE_BODY_VIA_CONTENT_LENGTH: 8,
+        STATE_BODY_WITH_NO_LENGTH: 9,
+        STATE_CHUNK_HEADER: 10,
+        STATE_CHUNK_EXTENSIONS: 11,
+        STATE_CHUNK_DATA: 12,
+        STATE_TRAILER: 13,
+        STATE_TUNNEL: 14,
+        PARSER_FIELD_MAX_START_LINE_LENGTH: 0,
+        PARSER_FIELD_MAX_HEADER_LENGTH: 4,
+        PARSER_FIELD_MAX_BODY_PAYLOAD: 8,
+        PARSER_FIELD_AUTODETECT: 16,
+        PARSER_FIELD_IS_REQUEST: 17,
+        PARSER_FIELD_SUSPEND_AFTER_HEADERS: 18,
+        PARSER_FIELD_MANAGE_UNCONSUMED: 19,
+        PARSER_FIELD_CONTINUE_WITHOUT_DATA: 20,
+        PARSER_FIELD_IS_CONNECT: 21,
+        PARSER_FIELD_SKIP_BODY: 22,
+        PARSER_FIELD_DEBUG: 23,
+        PARSER_FIELD_PARSED: 24,
+        PARSER_FIELD_POSITION: 32,
+        PARSER_FIELD_STATE: 36,
+        PARSER_FIELD_PAUSED: 37,
+        PARSER_FIELD_ERROR_CODE: 38,
+        PARSER_FIELD_CONTENT_LENGTH: 40,
+        PARSER_FIELD_CHUNK_SIZE: 48,
+        PARSER_FIELD_REMAINING_CONTENT_LENGTH: 56,
+        PARSER_FIELD_REMAINING_CHUNK_SIZE: 64,
+        PARSER_FIELD_STATUS: 72,
+        PARSER_FIELD_METHOD: 76,
+        PARSER_FIELD_HAS_CONTENT_LENGTH: 77,
+        PARSER_FIELD_HAS_TRANSFER_ENCODING: 78,
+        PARSER_FIELD_HAS_CHUNKED_TRANSFER_ENCODING: 79,
+        PARSER_FIELD_HAS_CONNECTION_CLOSE: 80,
+        PARSER_FIELD_HAS_CONNECTION_UPGRADE: 81,
+        PARSER_FIELD_HAS_UPGRADE: 82,
+        PARSER_FIELD_HAS_TRAILERS: 83,
+        PARSER_FIELD_ACTIVE_CALLBACKS: 88,
+        PARSER_FIELD_ACTIVE_EVENTS: 96,
+        PARSER_FIELD_PTR: 104,
+        PARSER_FIELD_ERROR_DESCRIPTION: 108,
+        PARSER_FIELD_UNCONSUMED: 364,
+        PARSER_FIELD_UNCONSUMED_LEN: 368,
+        PARSER_FIELD_ERROR_DESCRIPTION_LEN: 372,
+        PARSER_FIELD_EVENTS: 376,
+        Errors,
+        Methods,
+        Callbacks,
+        CallbackActives,
+        Events,
+        EventActives,
+        States,
+        ParserFields,
+        isAutodetect: isAutodetect.bind(wasm),
+        isRequest: isRequest2.bind(wasm),
+        isPaused: isPaused.bind(wasm),
+        shouldManageUnconsumed: shouldManageUnconsumed.bind(wasm),
+        shouldSuspendAfterHeaders: shouldSuspendAfterHeaders.bind(wasm),
+        getMaxStartLineLength: getMaxStartLineLength.bind(wasm),
+        getMaxHeaderLength: getMaxHeaderLength.bind(wasm),
+        getMaxBodyPayload: getMaxBodyPayload.bind(wasm),
+        shouldContinueWithoutData: shouldContinueWithoutData.bind(wasm),
+        isConnect: isConnect.bind(wasm),
+        isDebug: isDebug.bind(wasm),
+        shouldSkipBody: shouldSkipBody.bind(wasm),
+        getState: getState.bind(wasm),
+        getPosition: getPosition.bind(wasm),
+        getParsed: getParsed.bind(wasm),
+        getErrorCode: getErrorCode.bind(wasm),
+        getMethod: getMethod.bind(wasm),
+        getStatus: getStatus.bind(wasm),
+        hasConnectionClose: hasConnectionClose.bind(wasm),
+        hasConnectionUpgrade: hasConnectionUpgrade.bind(wasm),
+        getContentLength: getContentLength.bind(wasm),
+        getChunkSize: getChunkSize.bind(wasm),
+        getRemainingContentLength: getRemainingContentLength.bind(wasm),
+        getRemainingChunkSize: getRemainingChunkSize.bind(wasm),
+        hasContentLength: hasContentLength.bind(wasm),
+        hasTransferEncoding: hasTransferEncoding.bind(wasm),
+        hasChunkedTransferEncoding: hasChunkedTransferEncoding.bind(wasm),
+        hasUpgrade: hasUpgrade.bind(wasm),
+        hasTrailers: hasTrailers.bind(wasm),
+        getErrorDescription: getErrorDescription.bind(wasm),
+        setShouldAutodetect: setShouldAutodetect.bind(wasm),
+        setShouldContinueWithoutData: setShouldContinueWithoutData.bind(wasm),
+        setIsRequest: setIsRequest.bind(wasm),
+        setIsConnect: setIsConnect.bind(wasm),
+        setDebug: setDebug.bind(wasm),
+        setShouldManageUnconsumed: setShouldManageUnconsumed.bind(wasm),
+        setShouldSuspendAfterHeaders: setShouldSuspendAfterHeaders.bind(wasm),
+        setMaxStartLineLength: setMaxStartLineLength.bind(wasm),
+        setMaxHeaderLength: setMaxHeaderLength.bind(wasm),
+        setMaxBodyPayload: setMaxBodyPayload.bind(wasm),
+        setShouldSkipBody: setShouldSkipBody.bind(wasm),
+        setActiveCallbacks: setActiveCallbacks.bind(wasm),
+        setActiveEvents: setActiveEvents.bind(wasm),
+        memory: wasm.memory,
+        alloc: alloc.bind(wasm),
+        dealloc: dealloc.bind(wasm),
+        create: create2.bind(wasm),
+        destroy: destroy.bind(wasm),
+        parse: parse.bind(wasm),
+        fail: fail.bind(wasm),
+        hasDebug: hasDebug.bind(wasm),
+        clear: wasm.clear,
+        complete: wasm.complete,
+        finish: wasm.finish,
+        pause: wasm.pause,
+        reset: wasm.reset,
+        resume: wasm.resume
+      };
+      return milo;
+    }
+    function simple() {
+      const spans = {};
+      const milo = setup({
+        /* REPLACE: callbacks:simple */
+      });
+      milo.spans = spans;
+      milo.create = simpleCreate.bind(milo, spans, milo.create);
+      milo.destroy = simpleDestroy.bind(milo, spans, milo.destroy);
+      return milo;
+    }
+    module2.exports = { wasmModule, noop: noop2, setup, simple };
+  }
+});
+
+// node_modules/undici/lib/milo/no-simd.js
+var require_no_simd = __commonJS({
+  "node_modules/undici/lib/milo/no-simd.js"(exports2, module2) {
+    var wasmModule = new WebAssembly.Module(
+      Buffer.from(
+        "AGFzbQEAAAABQgtgA39/fwBgAX8Bf2ACf38AYAF/AGABfwF+YAJ/fgBgBH9/f38AYAABf2AIf39/f39/f3wAYAN/f38Bf2ACf38BfwKUBBwDZW52CG9uX2Vycm9yAAADZW52Cm9uX2hlYWRlcnMACANlbnYJb25fZmluaXNoAAADZW52EG9uX21lc3NhZ2Vfc3RhcnQAAANlbnYTb25fbWVzc2FnZV9jb21wbGV0ZQAAA2Vudgpvbl9yZXF1ZXN0AAADZW52C29uX3Jlc3BvbnNlAAADZW52CG9uX3Jlc2V0AAADZW52CW9uX21ldGhvZAAAA2VudgZvbl91cmwAAANlbnYLb25fcHJvdG9jb2wAAANlbnYKb25fdmVyc2lvbgAAA2Vudglvbl9zdGF0dXMAAANlbnYJb25fcmVhc29uAAADZW52Dm9uX2hlYWRlcl9uYW1lAAADZW52D29uX2hlYWRlcl92YWx1ZQAAA2Vudgpvbl9jb25uZWN0AAADZW52Cm9uX3VwZ3JhZGUAAANlbnYPb25fY2h1bmtfbGVuZ3RoAAADZW52F29uX2NodW5rX2V4dGVuc2lvbl9uYW1lAAADZW52GG9uX2NodW5rX2V4dGVuc2lvbl92YWx1ZQAAA2Vudghvbl9jaHVuawAAA2Vudgdvbl9ib2R5AAADZW52B29uX2RhdGEAAANlbnYPb25fdHJhaWxlcl9uYW1lAAADZW52EG9uX3RyYWlsZXJfdmFsdWUAAANlbnYLb25fdHJhaWxlcnMAAANlbnYPb25fc3RhdGVfY2hhbmdlAAADQUAGAQMDBwIDBgMEBAEEBAEBAQQBBAQBAQEBAQEBAQEBAQEBAQcJAwIDBQUCAgIFAgICAgICAgEBAQEKAQIDAgICBQMBABEGCQF/AUGAgMAACwedCDkGbWVtb3J5AgAFYWxsb2MAHQVjbGVhcgAeCGNvbXBsZXRlAB8GY3JlYXRlACAHZGVhbGxvYwAhB2Rlc3Ryb3kAIgRmYWlsACMGZmluaXNoACQOZ2V0X2NodW5rX3NpemUAJRJnZXRfY29udGVudF9sZW5ndGgAJg5nZXRfZXJyb3JfY29kZQAnGWdldF9lcnJvcl9kZXNjcmlwdGlvbl9yYXcAKBRnZXRfbWF4X2JvZHlfcGF5bG9hZAApFWdldF9tYXhfaGVhZGVyX2xlbmd0aAAqGWdldF9tYXhfc3RhcnRfbGluZV9sZW5ndGgAKwpnZXRfbWV0aG9kACwKZ2V0X3BhcnNlZAAtDGdldF9wb3NpdGlvbgAuGGdldF9yZW1haW5pbmdfY2h1bmtfc2l6ZQAvHGdldF9yZW1haW5pbmdfY29udGVudF9sZW5ndGgAMAlnZXRfc3RhdGUAMQpnZXRfc3RhdHVzADIdaGFzX2NodW5rZWRfdHJhbnNmZXJfZW5jb2RpbmcAMxRoYXNfY29ubmVjdGlvbl9jbG9zZQA0Fmhhc19jb25uZWN0aW9uX3VwZ3JhZGUANRJoYXNfY29udGVudF9sZW5ndGgANgxoYXNfdHJhaWxlcnMANxVoYXNfdHJhbnNmZXJfZW5jb2RpbmcAOAtoYXNfdXBncmFkZQA5DWlzX2F1dG9kZXRlY3QAOgppc19jb25uZWN0ADsIaXNfZGVidWcAPAlpc19wYXVzZWQAPQppc19yZXF1ZXN0AD4ObWlsb19oYXNfZGVidWcAPwVwYXJzZQBABXBhdXNlAEEFcmVzZXQAQgZyZXN1bWUAQxRzZXRfYWN0aXZlX2NhbGxiYWNrcwBEEXNldF9hY3RpdmVfZXZlbnRzAEUJc2V0X2RlYnVnAEYOc2V0X2lzX2Nvbm5lY3QARw5zZXRfaXNfcmVxdWVzdABIFHNldF9tYXhfYm9keV9wYXlsb2FkAEkVc2V0X21heF9oZWFkZXJfbGVuZ3RoAEoZc2V0X21heF9zdGFydF9saW5lX2xlbmd0aABLFXNldF9zaG91bGRfYXV0b2RldGVjdABMIHNldF9zaG91bGRfY29udGludWVfd2l0aG91dF9kYXRhAE0cc2V0X3Nob3VsZF9tYW5hZ2VfdW5jb25zdW1lZABOFHNldF9zaG91bGRfc2tpcF9ib2R5AE8gc2V0X3Nob3VsZF9zdXNwZW5kX2FmdGVyX2hlYWRlcnMAUBxzaG91bGRfY29udGludWVfd2l0aG91dF9kYXRhAFEYc2hvdWxkX21hbmFnZV91bmNvbnN1bWVkAFIQc2hvdWxkX3NraXBfYm9keQBTHHNob3VsZF9zdXNwZW5kX2FmdGVyX2hlYWRlcnMAVAr7pwJAlgIBBH8CQCACIANPDQAgAS0AACEFAkAgAyACayIHQQNNBEAMAQtBgIKECCAFQYGChAhsIgEgAigAAHMiBmsgBnJBgIGChHhxQYCBgoR4RwRADAELIAJBfHFBBGohAgJAIAdBCU8EQCACIANBCGsiB0sNAQNAQYCChAggAigCACABcyIGayAGckGAgYKEeHFBgIGChHhHDQJBgIKECCACQQRqKAIAIAFzIgZrIAZyQYCBgoR4cUGAgYKEeEcNAiACQQhqIgIgB00NAAsMAQsgAiADTw0CDAELIAIgA08NAQsgA0EBa0EBIQQDQCAFIAItAABGDQEgAkEBaiICIANHDQALIQJBACEECyAAIAI2AgQgACAENgIACyYAAkAgAEEATgRAIABFBEBBASEADAILIABBARBVIgANAQsACyAACzMAIABCADcDKCAAQQA6ABUgAEIANwMwIABCADcDOCAAQgA3A0AgAEIANwNIIABBADYCUAvSAwIDfwF+AkAgACIBLQAkIgBBDk1BAEEBIAB0QYDPAXEbRQRAIAFBAzoAJiABQQI6ACQgAUENOgD0AkEAIQAgAUEAOgB5IAFBp5jAACkAADcAbCABQayYwAApAAA3AHECQCABKQNYIAEpA2CEp0EBcUUEQCABKAL4AiECDAELIAEoAvgCIgJBAToAACACQQVqQQM6AAAgAkEBaiABKAIgNgAAQQYhAAsgACACakEAOgAADAELAn9BACABKQNYIAEpA2CEIgRCyACDUA0AGiAEQgiDQgBSBEAgASgC+AIiAEEEOgAAIABBBWpBADYAACAAQQFqIAEoAiA2AABBCSECCyACIARCwACDUA0AGiABKAL4AiACaiIAQQc6AAAgAEEFakEANgAAIABBAWogASgCIDYAACACQQlqCyECIAFBADoAFiABQQA6ABQCQCABLQBSQQFGBEBBDiEAIAEtABFBAXENAQsgAS0AUCEDIARCAoNQBEAgAyEADAELQQEhACADQQFxRQRAIAMhAAwBCyABKAL4AiACaiIDQQI6AAAgA0EFakEANgAAIANBAWogASgCIDYAACACQQlqIQILIAEgADoAJCABKAL4AiACakEAOgAACwvfAgEDfyMAQeAAayIAJAACQEGAgAQQViICRQ0AIAJBBGstAABBA3FFDQAgAkEAQYCABPwLAAsCQCACRQ0AIABBADYAXCAAQgA3AFQgAEIANwBMIABCADcARCAAQgA3ADwgAEIANwA0IABCADcCHCAAQgA3AiQgAEEANgIsIABCADcADyAAQQA6ABdBgANBCBBVIgFFDQAgAUIANwARIAFBAToAECABQgA3AwggAUKAwICAgIAINwMAIAFCADcAGSABQgA3AB8gASAAKQAzNwAnIAEgACkAOzcALyABIAApAEM3ADcgASAAKQBLNwA/IAEgACkAUzcARyABIAApAFg3AEwgASAAKAIoNgJkIAEgACkCIDcCXCABIAApAhg3AlQgAUHsAGpBAEH/AfwLACABIAI2AvgCIAEgAC8AFjsA8wIgASAAKQAONwDrAiABIAE2AmggAEHgAGokACABDwsACxUAAkAgAEUNACABRQ0AIAAgARBXCws4AQF/IAAEQCAAKALwAiIBBEAgACgC7AIgARBXCyAAKAL4AiIBBEAgAUGAgAQQVwsgAEGAAxBXCwuSAQEBfyAAIAE6ACYgAEECOgAkIABB7ABqIQRB/gEgAyADQf4BTxsiAwRAIAQgAiAD/AoAAAsgACADOgD0AiADIARqQQA6AABBACEDIAApA1ggACkDYIRCAYOnBH8gACgC+AIiAkEBOgAAIAJBBWogAToAACACQQFqIAAoAiA2AABBBgVBAAsgACgC+AJqQQA6AAALrAIBAn8CQAJAAkAgAC0AJCIBQQlNBEBBASABdEEbcQ0BIAFBAkYNAyABQQlGDQILIABBBToAJiAAQQI6ACQgAEEWOgD0AiAAQQA6AIIBIABBgIjAACkAADcAbCAAQYiIwAApAAA3AHQgAEGOiMAAKQAANwB6AkAgACkDWCAAKQNghKdBAXFFBEAgACgC+AIhAQwBCyAAKAL4AiIBQQE6AAAgAUEFakEFOgAAIAFBAWogACgCIDYAAEEGIQILIAEgAmpBADoAAA8LIABBAToAJA8LAn8gACkDWCAAKQNghEIIg1AEQCAAKAL4AiEBQQAMAQsgACgC+AIiAUEEOgAAIAFBBWpBADYAACABQQFqIAAoAiA2AABBCQshAiAAQQE6ACQgASACakEAOgAACwsHACAAKQMwCwcAIAApAygLBwAgAC0AJgsTACAAMQD0AiAAQewAaq1CIIaECwcAIAApAwgLBwAgACgCBAsHACAAKAIACwcAIAAtAEwLBwAgACkDGAsHACAAKAIgCwcAIAApA0ALBwAgACkDOAsHACAALQAkCwcAIAAoAkgL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DQEMAgsgBkEJRg0BCyADQQY6ACYgA0ECOgAkIANB64rAACkAADcAbCADQfOKwAApAAA3AHQgA0H7isAAKQAANwB8IANBgovAACkAADcAgwEMJwsgAEEBaiEAIAlBAWsiCQ0ACwsgAyAHQeQAbCAOQQpsQf4BcWogC2o2AkggIkUNAyA7QgBSBEAgBUEQakGBgARPDTQgAygCICEAIAMoAvgCIAVqQQo6AAAgAygC+AIgBWpBAWogADYAACADKAL4AiAFakEFakEENgAAIAVBCWohBQsgOkIAUgRAIAVBEGpBgYAETw00IAMoAiAhACADKAL4AiAFakELOgAAIAMoAvgCIAVqQQFqIABBBWo2AAAgAygC+AIgBWpBBWpBAzYAACAFQQlqIQULIEJCAFIEQCAFQRBqQYGABE8NNCADKAIgIQAgAygC+AIgBWpBDDoAACADKAL4AiAFakEBaiAAQQlqNgAAIAMoAvgCIAVqQQVqQQM2AAAgBUEJaiEFCyBBUA0DIA0NAyAFQRBqQYCABEsNMyADKAIgIQAgAygC+AIgBWpBDToAACADKAL4AiAFakEBaiAAQQ1qNgAAIAMoAvgCIAVqQQVqIAJBDWs2AAAgBUEJaiEFDAMLIANBDDoAJiADQQI6ACQgA0GKi8AAKQAANwBsIANBkovAACkAADcAdCADQZqLwAApAAA3AHwgA0Gii8AAKQAANwCEASADQaqLwAApAAA3AIwBIANBsYvAACgAADYAkwFBKyEIQZcBDDELIANBBjoAJiADQQI6ACQgA0HSi8AAKQAANwBsIANB2ovAACkAADcAdCADQd+LwAApAAA3AHkMCwsgBC0AAkHUAEcNBCAELQADQdAARw0EIAQtAARBL0cNBCADQRE6ACYgA0ECOgAkIANBhonAACkAADcAbCADQY6JwAApAAA3AHQgA0GWicAAKQAANwB8DAgLIAJBAmohACADLQAkQQJGDScgA0EGOgAkDCcLIANBDDoAJiADQQI6ACQgA0HPisAAKQAANwBsIANB14rAACkAADcAdCADQd+KwAApAAA3AHwgA0HnisAAKAAANgCEAQwcCyADKAIAIAhLDS0gA0EGOgAmIANBAjoAJCADQbuKwAApAAA3AGwgA0HDisAAKQAANwB0IANBy4rAACgAADYAfAwdCyAIRQ0FIAhBAWsgCk8N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KQAANwBsIANBwojAACkAADcAdCADQcqIwAApAAA3AHwMBQsgEyANayITIAtqIRUgCSEHIAYhAAJAA0AgACAKTw0pIAAgBGotAAAtAICGQARAIABBAWohACAHQQFrIgdFDQIMAQsLIANBBjoAJiADQQI6ACQgA0HSiMAAKQAANwBsIANB2ojAACkAADcAdCADQd+IwAApAAA3AHkMBwsgDiAQQQlqRw0CAkAgDiALa0EIRw0AIA0pAAAiLkLIqNGC9cWMlzBRDQIgLkLIqNGC9aWMlzFSDQAgD0UNBCADQRE6ACYgA0ECOgAkIANB54jAACkAADcAbCADQe+IwAApAAA3AHQgA0H3iMAAKQAANwB8IANB/ojAACkAADcAgwEMHgsLIANBBjoAJiADQQI6ACQgA0GeicAAKQAANwBsIANBponAACkAADcAdEEQIQhB/AAMKgsgDw0BIANBEToAJiADQQI6ACQgA0GGicAAKQAANwBsIANBjonAACkAADcAdCADQZaJwAApAAA3AHwMAgsgA0EGOgAmIANBAjoAJCADQa6JwAApAAA3AGwgA0G2icAAKQAANwB0IANBu4nAACkAADcAeQwDCwJAICNFDQAgQEIAUgRAIAVBEGpBgYAETw0qIAMoAiAhACADKAL4AiAFakEIOgAAIAMoAvgCIAVqQQFqIAA2AAAgAygC+AIgBWpBBWogAjYAACAFQQlqIQULID9CAFIEQCAFQRBqQYGABE8NKiADKAIgIQAgAygC+AIgBWpBCToAACADKAL4AiAFakEBaiAAIAZqNgAAIAMoAvgCIAVqQQVqIAk2AAAgBUEJaiEFCyA7QgBSBEAgBUEQakGBgARPDSogAygCICEAIAMoAvgCIAVqQQo6AAAgAygC+AIgBWpBAWogACALajYAACADKAL4AiAFakEFaiATNgAAIAVBCWohBQsgOlANACAFQRBqQYCABEsNKSADKAIgIQAgAygC+AIgBWpBCzoAACADKAL4AiAFakEBaiAAIBVBAWpqNgAAIAMoAvgCIAVqQQVqQQM2AAAgBUEJaiEFCyAOQQJqIQAgAy0AJCECIAMtAExBCkYEQCACQQJGDSEgA0EFOgAkDCELIAJBAkYNICADQQY6ACQMIAtBGCEIQYQBDCYLIAMoAgAgCEsNJiADQQY6ACYgA0ECOgAkIANBpYjA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EFkgASAAIAJqIgBBAXI2AgQgACABaiAANgIAIAFB3JvAACgCAEcNAUHUm8AAIAA2AgAPCyACIANBfnE2AgQgASAAQQFyNgIEIAAgAWogADYCAAsgAEGAAkkNBCABIAAQW0H0m8AAQfSbwAAoAgBBAWsiADYCACAADQZBvJnAACgCACIADQJB/x8MAwtB4JvAACABNgIAQdibwABB2JvAACgCACAAaiIANgIAIAEgAEEBcjYCBEHcm8AAKAIAIAFGBEBB1JvAAEEANgIAQdybwABBADYCAAsgAEHsm8AAKAIAIgJNDQVB4JvAACgCACIARQ0FQdibwAAoAgAiA0EpSQ0EQbSZwAAhAQNAIAAgASgCACIETwRAIAAgBCABKAIEakkNBgsgASgCCCEBDAALAAtB3JvAACABNgIAQdSbwABB1JvAACgCACAAaiIANgIAIAEgAEEBcjYCBCAAIAFqIAA2AgAPC0EAIQEDQCABQQFqIQEgACgCCCIADQALQf8fIAEgAUH/H00bCzYCAA8LAkBBzJvAACgCACICQQEgAEEDdnQiA3FFBEBBzJvAACACIANyNgIAIABB+AFxQcSZwABqIgAhAgwBCyAAQfgBcSIAQcSZwABqIQIgAEHMmcAAaigCACEACyACIAE2AgggACABNgIMIAEgAjYCDCABIAA2AggPC0H0m8AAQbyZwAAoAgAiAAR/QQAhAQNAIAFBAWohASAAKAIIIgANAAtB/x8gASABQf8fTRsFQf8fCzYCACACIANPDQBB7JvAAEF/NgIACwuCAwEEfyAAKAIMIQICQAJAAkAgAUGAAk8EQCAAKAIYIQMCQAJAIAAgAkYEQCAAQRRBECAAKAIUIgIbaigCACIBDQFBACECDAILIAAoAggiASACNgIMIAIgATYCCAwBCyAAQRRqIABBEGogAhshBANAIAQhBSABIgJBFGogAkEQaiACKAIUIgEbIQQgAkEUQRAgARtqKAIAIgENAAsgBUEANgIACyADRQ0CAkAgACgCHEECdEG0mMAAaiIBKAIAIABHBEAgAygCECAARg0BIAMgAjYCFCACDQMMBAsgASACNgIAIAJFDQQMAgsgAyACNgIQIAINAQwCCyAAKAIIIgAgAkcEQCAAIAI2AgwgAiAANgIIDwtBzJvAAEHMm8AAKAIAQX4gAUEDdndxNgIADwsgAiADNgIYIAAoAhAiAQRAIAIgATYCECABIAI2AhgLIAAoAhQiAEUNACACIAA2AhQgACACNgIYDwsPC0HQm8AAQdCbwAAoAgBBfiAAKAIcd3E2AgALjgQBAn8gACABaiECAkACQAJAIAAoAgQiA0EBcQ0AIANBAnFFDQEgACgCACIDIAFqIQEgACADayIAQdybwAAoAgBGBEAgAigCBEEDcUEDRw0BQdSbwAAgATYCACACIAIoAgRBfnE2AgQgACABQQFyNgIEIAIgATYCAA8LIAAgAxBZCwJAAkAgAigCBCIDQQJxRQRAIAJB4JvAACgCAEYNAiACQdybwAAoAgBGDQQgAiADQXhxIgIQWSAAIAEgAmoiAUEBcjYCBCAAIAFqIAE2AgAgAEHcm8AAKAIARw0BQdSbwAAgATYCAA8LIAIgA0F+cTYCBCAAIAFBAXI2AgQgACABaiABNgIACyABQYACTwRAIAAgARBbDwsCQEHMm8AAKAIAIgJBASABQQN2dCIDcUUEQEHMm8AAIAIgA3I2AgAgAUH4AXFBxJnAAGoiASECDAELIAFB+AFxIgFBxJnAAGohAiABQcyZwABqKAIAIQELIAIgADYCCCABIAA2AgwgACACNgIMIAAgATYCCA8LQeCbwAAgADYCAEHYm8AAQdibwAAoAgAgAWoiATYCACAAIAFBAXI2AgQgAEHcm8AAKAIARw0AQdSbwABBADYCAEHcm8AAQQA2AgALDwtB3JvAACAANgIAQdSbwABB1JvAACgCACABaiIBNgIAIAAgAUEBcjYCBCAAIAFqIAE2AgALwwIBBH8gAEIANwIQIAACf0EAIAFBCHYiA0UNABpBHyABQYCAgAhPDQAaIAFBJiADZyIDa3ZBAXEgA0EBdHJBPnMLIgI2AhwgAkECdEG0mMAAaiEEQQEgAnQiA0HQm8AAKAIAcUUEQCAEIAA2AgAgACAENgIYIAAgADYCDCAAIAA2AghB0JvAAEHQm8AAKAIAIANyNgIADwsCQAJAIAEgBCgCACIDKAIEQXhxRgRAIAMhAgwBCyABQRkgAkEBdmtBACACQR9HG3QhBQNAIAMgBUEddkEEcWoiBCgCECICRQ0CIAVBAXQhBSACIQMgAigCBEF4cSABRw0ACwsgAigCCCIBIAA2AgwgAiAANgIIIABBADYCGCAAIAI2AgwgACABNgIIDwsgBEEQaiAANgIAIAAgAzYCGCAAIAA2AgwgACAANgIICwvuFQcAQaGAwAALXgEAAQEBAQEAAAEBAAEBAAEBAQEBAQEBAQEAAAAAAAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEAAAABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQABAAEAQYmCwAALAQEAQaCCwAAL4AEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQBBiYTAAAsBAQBBoITAAAvgAQEBAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAEGhhsAAC14BAAABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEAAQABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQABAAEAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEAAAABAEGAiMAAC7QQVW5leHBlY3RlZCBlbmQgb2YgZGF0YVVuZXhwZWN0ZWQgZGF0YVJlcXVlc3QgbGluZSB0b28gbG9uZ0ludmFsaWQgbWV0aG9kIGNoYXJhY3RlckludmFsaWQgVVJMIGNoYXJhY3RlclBSSSBpcyBvbmx5IHZhbGlkIHdpdGggSFRUUC8yLjBVbnN1cHBvcnRlZCBIVFRQIHZlcnNpb25JbnZhbGlkIHByb3RvY29sSW52YWxpZCBwcm90b2NvbCBuYW1lRXhwZWN0ZWQgLyBhZnRlciB0aGUgcHJvdG9jb2wgbmFtZUV4cGVjdGVkIHNwYWNlIGFmdGVyIFVSTEV4cGVjdGVkIHNwYWNlIGFmdGVyIG1ldGhvZFJlcXVlc3QgbGluZSB0b28gc2hvcnRFeHBlY3RlZCBDUkxGU3RhdHVzIGxpbmUgdG9vIGxvbmdJbnZhbGlkIEhUVFAgcmVzcG9uc2Ugc3RhdHVzSW52YWxpZCBzdGF0dXMgcmVhc29uIGNoYXJhY3RlckV4cGVjdGVkIGEgc3BhY2UgYWZ0ZXIgSFRUUCByZXNwb25zZSBzdGF0dXNFeHBlY3RlZCBzcGFjZSBhZnRlciBwcm90b2NvbFN0YXR1cyBsaW5lIHRvbyBzaG9ydE1hbGZvcm1lZCBIVFRQLzIuMCBwcmVmYWNlSGVhZGVyIGxpbmUgdG9vIGxvbmdVbmV4cGVjdGVkIENvbnRlbnQtTGVuZ3RoIGhlYWRlciBmb3IgYSByZXNwb25zZSB3aXRob3V0IGJvZHlFeHBlY3RlZCBDb250ZW50LUxlbmd0aCBoZWFkZXIgdmFsdWVJbnZhbGlkIENvbnRlbnQtTGVuZ3RoIGhlYWRlckludmFsaWQgZHVwbGljYXRlIENvbnRlbnQtTGVuZ3RoIGhlYWRlclVuZXhwZWN0ZWQgQ29udGVudC1MZW5ndGggaGVhZGVyIHdoZW4gVHJhbnNmZXItRW5jb2RpbmcgaGVhZGVyIGlzIHByZXNlbnRVbmV4cGVjdGVkIFRyYW5zZmVyLUVuY29kaW5nIGhlYWRlciBmb3IgYSByZXNwb25zZSB3aXRob3V0IGJvZHlFeHBlY3RlZCBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgdmFsdWVUaGUgdmFsdWUgImNodW5rZWQiIGluIHRoZSBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgbXVzdCBiZSB0aGUgbGFzdCBwcm92aWRlZCBhbmQgY2FuIGJlIHByb3ZpZGVkIG9ubHkgb25jZVRoZSB2YWx1ZSAiY2h1bmtlZCIgaW4gdGhlIFRyYW5zZmVyLUVuY29kaW5nIGhlYWRlciBtdXN0IGJlIHRoZSBsYXN0IHByb3ZpZGVkVW5leHBlY3RlZCBUcmFuc2Zlci1FbmNvZGluZyBoZWFkZXIgd2hlbiBDb250ZW50LUxlbmd0aCBoZWFkZXIgaXMgcHJlc2VudEV4cGVjdGVkIENvbm5lY3Rpb24gaGVhZGVyIHZhbHVlSW52YWxpZCBDb25uZWN0aW9uIGhlYWRlciB2YWx1ZUV4cGVjdGVkIFRyYWlsZXIgaGVhZGVyIHZhbHVlRXhwZWN0ZWQgVXBncmFkZSBoZWFkZXIgdmFsdWVJbnZhbGlkIFVwZ3JhZGUgaGVhZGVyIHZhbHVlSW52YWxpZCBoZWFkZXIgZmllbGQgbmFtZSBjaGFyYWN0ZXJJbnZhbGlkIGhlYWRlciBmaWVsZCB2YWx1ZSBjaGFyYWN0ZXJNaXNzaW5nIENvbm5lY3Rpb24gaGVhZGVyIHNldCB0byAidXBncmFkZSIgd2hlbiB1c2luZyB0aGUgVXBncmFkZSBoZWFkZXJUcmFpbGVycyBhcmUgbm90IGFsbG93ZWQgd2hlbiBub3QgdXNpbmcgY2h1bmtlZCB0cmFuc2ZlciBlbmNvZGluZ1VuZXhwZWN0ZWQgY29udGVudCBmb3IgdGhlIHJlcXVlc3QgKEdFVCBvciBIRUFEKVRyYW5zZmVyLUVuY29kaW5nIGxhc3QgaGVhZGVyIHZhbHVlIG11c3QgYmUgImNodW5rZWQiIGlmIHRoZSBoZWFkZXIgaXMgcHJlc2VudENodW5rIGhlYWRlciB0b28gbG9uZ0ludmFsaWQgY2h1bmsgbGVuZ3RoIGNoYXJhY3RlckludmFsaWQgY2h1bmsgbGVuZ3RoIHNpemVFeHBlY3RlZCBjaHVuayBleHRlbnNpb24gbmFtZUludmFsaWQgY2h1bmsgZXh0ZW5zaW9uIG5hbWUgY2hhcmFjdGVyRXhwZWN0ZWQgY2xvc2luZyBxdW90ZSBmb3IgY2h1bmsgZXh0ZW5zaW9uIHZhbHVlSW52YWxpZCBjaHVuayBleHRlbnNpb24gcXVvdGVkIHZhbHVlIGNoYXJhY3RlckV4cGVjdGVkIGNodW5rIGV4dGVuc2lvbiB2YWx1ZUludmFsaWQgY2h1bmsgZXh0ZW5zaW9uIHZhbHVlIGNoYXJhY3RlckludmFsaWQgY2h1bmsgZXh0ZW5zaW9uIGNoYXJhY3RlciBhZnRlciB2YWx1ZUV4cGVjdGVkIENSTEYgYWZ0ZXIgY2h1bmsgZGF0YVRyYWlsZXIgbGluZSB0b28gbG9uZ0ludmFsaWQgdHJhaWxlciBmaWVsZCBuYW1lIGNoYXJhY3RlckludmFsaWQgdHJhaWxlciBmaWVsZCB2YWx1ZSBjaGFyYWN0ZXJJbnZhbGlkIHN0YXRl",
+        "base64"
+      )
+    );
+    var textEncoder2 = new TextEncoder();
+    var textDecoder = new TextDecoder();
+    function log(logger, raw) {
+      const len = Number(BigInt.asUintN(32, raw));
+      const ptr = Number(raw >> 32n);
+      logger(textDecoder.decode(new Uint8Array(this.memory.buffer, ptr, len)));
+    }
+    function alloc(len) {
+      return this.alloc(len) >>> 0;
+    }
+    function dealloc(ptr, len) {
+      return this.dealloc(ptr, len);
+    }
+    function create2() {
+      return this.create() >>> 0;
+    }
+    function destroy(parser) {
+      this.destroy(parser);
+    }
+    function parse(parser, data, limit) {
+      return this.parse(parser, data, limit) >>> 0;
+    }
+    function fail(parser, code, description) {
+      const len = description.length;
+      const ptr = this.alloc(len);
+      const buffer = new Uint8Array(this.memory.buffer, ptr, len);
+      textEncoder2.encodeInto(description, buffer);
+      this.fail(parser, code, ptr, len);
+      this.dealloc(ptr, len);
+    }
+    function hasDebug() {
+      return this.milo_has_debug() !== 0;
+    }
+    var Errors = Object.freeze({
+      NONE: 0,
+      USER: 1,
+      CALLBACK_ERROR: 2,
+      UNEXPECTED_STATE: 3,
+      UNEXPECTED_DATA: 4,
+      UNEXPECTED_EOF: 5,
+      UNEXPECTED_CHARACTER: 6,
+      UNEXPECTED_CONTENT_LENGTH: 7,
+      UNEXPECTED_TRANSFER_ENCODING: 8,
+      UNEXPECTED_CONTENT: 9,
+      UNEXPECTED_TRAILERS: 10,
+      INVALID_VERSION: 11,
+      INVALID_STATUS: 12,
+      INVALID_CONTENT_LENGTH: 13,
+      INVALID_TRANSFER_ENCODING: 14,
+      INVALID_CHUNK_SIZE: 15,
+      MISSING_CONNECTION_UPGRADE: 16,
+      UNSUPPORTED_HTTP_VERSION: 17,
+      0: "NONE",
+      1: "USER",
+      2: "CALLBACK_ERROR",
+      3: "UNEXPECTED_STATE",
+      4: "UNEXPECTED_DATA",
+      5: "UNEXPECTED_EOF",
+      6: "UNEXPECTED_CHARACTER",
+      7: "UNEXPECTED_CONTENT_LENGTH",
+      8: "UNEXPECTED_TRANSFER_ENCODING",
+      9: "UNEXPECTED_CONTENT",
+      10: "UNEXPECTED_TRAILERS",
+      11: "INVALID_VERSION",
+      12: "INVALID_STATUS",
+      13: "INVALID_CONTENT_LENGTH",
+      14: "INVALID_TRANSFER_ENCODING",
+      15: "INVALID_CHUNK_SIZE",
+      16: "MISSING_CONNECTION_UPGRADE",
+      17: "UNSUPPORTED_HTTP_VERSION"
+    });
+    var Methods = Object.freeze({
+      OTHER: 0,
+      GET: 1,
+      HEAD: 2,
+      POST: 3,
+      PUT: 4,
+      DELETE: 5,
+      CONNECT: 6,
+      OPTIONS: 7,
+      TRACE: 8,
+      PATCH: 9,
+      PRI: 10,
+      0: "OTHER",
+      1: "GET",
+      2: "HEAD",
+      3: "POST",
+      4: "PUT",
+      5: "DELETE",
+      6: "CONNECT",
+      7: "OPTIONS",
+      8: "TRACE",
+      9: "PATCH",
+      10: "PRI"
+    });
+    var Callbacks = Object.freeze({
+      ON_ERROR: 0,
+      ON_FINISH: 1,
+      ON_MESSAGE_START: 2,
+      ON_MESSAGE_COMPLETE: 3,
+      ON_REQUEST: 4,
+      ON_RESPONSE: 5,
+      ON_RESET: 6,
+      ON_METHOD: 7,
+      ON_URL: 8,
+      ON_PROTOCOL: 9,
+      ON_VERSION: 10,
+      ON_STATUS: 11,
+      ON_REASON: 12,
+      ON_HEADER_NAME: 13,
+      ON_HEADER_VALUE: 14,
+      ON_HEADERS: 15,
+      ON_CONNECT: 16,
+      ON_UPGRADE: 17,
+      ON_CHUNK_LENGTH: 18,
+      ON_CHUNK_EXTENSION_NAME: 19,
+      ON_CHUNK_EXTENSION_VALUE: 20,
+      ON_CHUNK: 21,
+      ON_BODY: 22,
+      ON_DATA: 23,
+      ON_TRAILER_NAME: 24,
+      ON_TRAILER_VALUE: 25,
+      ON_TRAILERS: 26,
+      ON_STATE_CHANGE: 27,
+      0: "ON_ERROR",
+      1: "ON_FINISH",
+      2: "ON_MESSAGE_START",
+      3: "ON_MESSAGE_COMPLETE",
+      4: "ON_REQUEST",
+      5: "ON_RESPONSE",
+      6: "ON_RESET",
+      7: "ON_METHOD",
+      8: "ON_URL",
+      9: "ON_PROTOCOL",
+      10: "ON_VERSION",
+      11: "ON_STATUS",
+      12: "ON_REASON",
+      13: "ON_HEADER_NAME",
+      14: "ON_HEADER_VALUE",
+      15: "ON_HEADERS",
+      16: "ON_CONNECT",
+      17: "ON_UPGRADE",
+      18: "ON_CHUNK_LENGTH",
+      19: "ON_CHUNK_EXTENSION_NAME",
+      20: "ON_CHUNK_EXTENSION_VALUE",
+      21: "ON_CHUNK",
+      22: "ON_BODY",
+      23: "ON_DATA",
+      24: "ON_TRAILER_NAME",
+      25: "ON_TRAILER_VALUE",
+      26: "ON_TRAILERS",
+      27: "ON_STATE_CHANGE"
+    });
+    var CallbackActives = Object.freeze({
+      NONE: 0n,
+      ON_ERROR: 1n,
+      ON_FINISH: 2n,
+      ON_MESSAGE_START: 4n,
+      ON_MESSAGE_COMPLETE: 8n,
+      ON_REQUEST: 16n,
+      ON_RESPONSE: 32n,
+      ON_RESET: 64n,
+      ON_METHOD: 128n,
+      ON_URL: 256n,
+      ON_PROTOCOL: 512n,
+      ON_VERSION: 1024n,
+      ON_STATUS: 2048n,
+      ON_REASON: 4096n,
+      ON_HEADER_NAME: 8192n,
+      ON_HEADER_VALUE: 16384n,
+      ON_HEADERS: 32768n,
+      ON_CONNECT: 65536n,
+      ON_UPGRADE: 131072n,
+      ON_CHUNK_LENGTH: 262144n,
+      ON_CHUNK_EXTENSION_NAME: 524288n,
+      ON_CHUNK_EXTENSION_VALUE: 1048576n,
+      ON_CHUNK: 2097152n,
+      ON_BODY: 4194304n,
+      ON_DATA: 8388608n,
+      ON_TRAILER_NAME: 16777216n,
+      ON_TRAILER_VALUE: 33554432n,
+      ON_TRAILERS: 67108864n,
+      ON_STATE_CHANGE: 134217728n,
+      ALL: 268435455n,
+      0n: "NONE",
+      1n: "ON_ERROR",
+      2n: "ON_FINISH",
+      4n: "ON_MESSAGE_START",
+      8n: "ON_MESSAGE_COMPLETE",
+      16n: "ON_REQUEST",
+      32n: "ON_RESPONSE",
+      64n: "ON_RESET",
+      128n: "ON_METHOD",
+      256n: "ON_URL",
+      512n: "ON_PROTOCOL",
+      1024n: "ON_VERSION",
+      2048n: "ON_STATUS",
+      4096n: "ON_REASON",
+      8192n: "ON_HEADER_NAME",
+      16384n: "ON_HEADER_VALUE",
+      32768n: "ON_HEADERS",
+      65536n: "ON_CONNECT",
+      131072n: "ON_UPGRADE",
+      262144n: "ON_CHUNK_LENGTH",
+      524288n: "ON_CHUNK_EXTENSION_NAME",
+      1048576n: "ON_CHUNK_EXTENSION_VALUE",
+      2097152n: "ON_CHUNK",
+      4194304n: "ON_BODY",
+      8388608n: "ON_DATA",
+      16777216n: "ON_TRAILER_NAME",
+      33554432n: "ON_TRAILER_VALUE",
+      67108864n: "ON_TRAILERS",
+      134217728n: "ON_STATE_CHANGE",
+      268435455n: "ALL"
+    });
+    var Events = Object.freeze({
+      END: 0,
+      ERROR: 1,
+      FINISH: 2,
+      MESSAGE_START: 3,
+      MESSAGE_COMPLETE: 4,
+      REQUEST: 5,
+      RESPONSE: 6,
+      RESET: 7,
+      METHOD: 8,
+      URL: 9,
+      PROTOCOL: 10,
+      VERSION: 11,
+      STATUS: 12,
+      REASON: 13,
+      HEADER_NAME: 14,
+      HEADER_VALUE: 15,
+      HEADERS: 16,
+      CONNECT: 17,
+      UPGRADE: 18,
+      CHUNK_LENGTH: 19,
+      CHUNK_EXTENSION_NAME: 20,
+      CHUNK_EXTENSION_VALUE: 21,
+      CHUNK: 22,
+      BODY: 23,
+      DATA: 24,
+      TRAILER_NAME: 25,
+      TRAILER_VALUE: 26,
+      TRAILERS: 27,
+      STATE_CHANGE: 28,
+      0: "END",
+      1: "ERROR",
+      2: "FINISH",
+      3: "MESSAGE_START",
+      4: "MESSAGE_COMPLETE",
+      5: "REQUEST",
+      6: "RESPONSE",
+      7: "RESET",
+      8: "METHOD",
+      9: "URL",
+      10: "PROTOCOL",
+      11: "VERSION",
+      12: "STATUS",
+      13: "REASON",
+      14: "HEADER_NAME",
+      15: "HEADER_VALUE",
+      16: "HEADERS",
+      17: "CONNECT",
+      18: "UPGRADE",
+      19: "CHUNK_LENGTH",
+      20: "CHUNK_EXTENSION_NAME",
+      21: "CHUNK_EXTENSION_VALUE",
+      22: "CHUNK",
+      23: "BODY",
+      24: "DATA",
+      25: "TRAILER_NAME",
+      26: "TRAILER_VALUE",
+      27: "TRAILERS",
+      28: "STATE_CHANGE"
+    });
+    var EventActives = Object.freeze({
+      NONE: 0n,
+      ON_ERROR: 1n,
+      ON_FINISH: 2n,
+      ON_MESSAGE_START: 4n,
+      ON_MESSAGE_COMPLETE: 8n,
+      ON_REQUEST: 16n,
+      ON_RESPONSE: 32n,
+      ON_RESET: 64n,
+      ON_METHOD: 128n,
+      ON_URL: 256n,
+      ON_PROTOCOL: 512n,
+      ON_VERSION: 1024n,
+      ON_STATUS: 2048n,
+      ON_REASON: 4096n,
+      ON_HEADER_NAME: 8192n,
+      ON_HEADER_VALUE: 16384n,
+      ON_HEADERS: 32768n,
+      ON_CONNECT: 65536n,
+      ON_UPGRADE: 131072n,
+      ON_CHUNK_LENGTH: 262144n,
+      ON_CHUNK_EXTENSION_NAME: 524288n,
+      ON_CHUNK_EXTENSION_VALUE: 1048576n,
+      ON_CHUNK: 2097152n,
+      ON_BODY: 4194304n,
+      ON_DATA: 8388608n,
+      ON_TRAILER_NAME: 16777216n,
+      ON_TRAILER_VALUE: 33554432n,
+      ON_TRAILERS: 67108864n,
+      ON_STATE_CHANGE: 134217728n,
+      ALL: 268435455n,
+      0n: "NONE",
+      1n: "ON_ERROR",
+      2n: "ON_FINISH",
+      4n: "ON_MESSAGE_START",
+      8n: "ON_MESSAGE_COMPLETE",
+      16n: "ON_REQUEST",
+      32n: "ON_RESPONSE",
+      64n: "ON_RESET",
+      128n: "ON_METHOD",
+      256n: "ON_URL",
+      512n: "ON_PROTOCOL",
+      1024n: "ON_VERSION",
+      2048n: "ON_STATUS",
+      4096n: "ON_REASON",
+      8192n: "ON_HEADER_NAME",
+      16384n: "ON_HEADER_VALUE",
+      32768n: "ON_HEADERS",
+      65536n: "ON_CONNECT",
+      131072n: "ON_UPGRADE",
+      262144n: "ON_CHUNK_LENGTH",
+      524288n: "ON_CHUNK_EXTENSION_NAME",
+      1048576n: "ON_CHUNK_EXTENSION_VALUE",
+      2097152n: "ON_CHUNK",
+      4194304n: "ON_BODY",
+      8388608n: "ON_DATA",
+      16777216n: "ON_TRAILER_NAME",
+      33554432n: "ON_TRAILER_VALUE",
+      67108864n: "ON_TRAILERS",
+      134217728n: "ON_STATE_CHANGE",
+      268435455n: "ALL"
+    });
+    var States = Object.freeze({
+      START: 0,
+      FINISH: 1,
+      ERROR: 2,
+      REQUEST_LINE: 3,
+      STATUS_LINE: 4,
+      HTTP2_PREFACE: 5,
+      HEADER: 6,
+      BODY_DECISION: 7,
+      BODY_VIA_CONTENT_LENGTH: 8,
+      BODY_WITH_NO_LENGTH: 9,
+      CHUNK_HEADER: 10,
+      CHUNK_EXTENSIONS: 11,
+      CHUNK_DATA: 12,
+      TRAILER: 13,
+      TUNNEL: 14,
+      0: "START",
+      1: "FINISH",
+      2: "ERROR",
+      3: "REQUEST_LINE",
+      4: "STATUS_LINE",
+      5: "HTTP2_PREFACE",
+      6: "HEADER",
+      7: "BODY_DECISION",
+      8: "BODY_VIA_CONTENT_LENGTH",
+      9: "BODY_WITH_NO_LENGTH",
+      10: "CHUNK_HEADER",
+      11: "CHUNK_EXTENSIONS",
+      12: "CHUNK_DATA",
+      13: "TRAILER",
+      14: "TUNNEL"
+    });
+    var ParserFields = Object.freeze({
+      MAX_START_LINE_LENGTH: 0,
+      MAX_HEADER_LENGTH: 4,
+      MAX_BODY_PAYLOAD: 8,
+      AUTODETECT: 16,
+      IS_REQUEST: 17,
+      SUSPEND_AFTER_HEADERS: 18,
+      MANAGE_UNCONSUMED: 19,
+      CONTINUE_WITHOUT_DATA: 20,
+      IS_CONNECT: 21,
+      SKIP_BODY: 22,
+      DEBUG: 23,
+      PARSED: 24,
+      POSITION: 32,
+      STATE: 36,
+      PAUSED: 37,
+      ERROR_CODE: 38,
+      CONTENT_LENGTH: 40,
+      CHUNK_SIZE: 48,
+      REMAINING_CONTENT_LENGTH: 56,
+      REMAINING_CHUNK_SIZE: 64,
+      STATUS: 72,
+      METHOD: 76,
+      HAS_CONTENT_LENGTH: 77,
+      HAS_TRANSFER_ENCODING: 78,
+      HAS_CHUNKED_TRANSFER_ENCODING: 79,
+      HAS_CONNECTION_CLOSE: 80,
+      HAS_CONNECTION_UPGRADE: 81,
+      HAS_UPGRADE: 82,
+      HAS_TRAILERS: 83,
+      ACTIVE_CALLBACKS: 88,
+      ACTIVE_EVENTS: 96,
+      PTR: 104,
+      ERROR_DESCRIPTION: 108,
+      UNCONSUMED: 364,
+      UNCONSUMED_LEN: 368,
+      ERROR_DESCRIPTION_LEN: 372,
+      EVENTS: 376,
+      0: "MAX_START_LINE_LENGTH",
+      4: "MAX_HEADER_LENGTH",
+      8: "MAX_BODY_PAYLOAD",
+      16: "AUTODETECT",
+      17: "IS_REQUEST",
+      18: "SUSPEND_AFTER_HEADERS",
+      19: "MANAGE_UNCONSUMED",
+      20: "CONTINUE_WITHOUT_DATA",
+      21: "IS_CONNECT",
+      22: "SKIP_BODY",
+      23: "DEBUG",
+      24: "PARSED",
+      32: "POSITION",
+      36: "STATE",
+      37: "PAUSED",
+      38: "ERROR_CODE",
+      40: "CONTENT_LENGTH",
+      48: "CHUNK_SIZE",
+      56: "REMAINING_CONTENT_LENGTH",
+      64: "REMAINING_CHUNK_SIZE",
+      72: "STATUS",
+      76: "METHOD",
+      77: "HAS_CONTENT_LENGTH",
+      78: "HAS_TRANSFER_ENCODING",
+      79: "HAS_CHUNKED_TRANSFER_ENCODING",
+      80: "HAS_CONNECTION_CLOSE",
+      81: "HAS_CONNECTION_UPGRADE",
+      82: "HAS_UPGRADE",
+      83: "HAS_TRAILERS",
+      88: "ACTIVE_CALLBACKS",
+      96: "ACTIVE_EVENTS",
+      104: "PTR",
+      108: "ERROR_DESCRIPTION",
+      364: "UNCONSUMED",
+      368: "UNCONSUMED_LEN",
+      372: "ERROR_DESCRIPTION_LEN",
+      376: "EVENTS"
+    });
+    function isAutodetect(parser) {
+      return this.is_autodetect(parser) !== 0;
+    }
+    function isRequest2(parser) {
+      return this.is_request(parser) !== 0;
+    }
+    function isPaused(parser) {
+      return this.is_paused(parser) !== 0;
+    }
+    function shouldManageUnconsumed(parser) {
+      return this.should_manage_unconsumed(parser) !== 0;
+    }
+    function shouldSuspendAfterHeaders(parser) {
+      return this.should_suspend_after_headers(parser) !== 0;
+    }
+    function getMaxStartLineLength(parser) {
+      return this.get_max_start_line_length(parser) >>> 0;
+    }
+    function getMaxHeaderLength(parser) {
+      return this.get_max_header_length(parser) >>> 0;
+    }
+    function getMaxBodyPayload(parser) {
+      return BigInt.asUintN(64, this.get_max_body_payload(parser));
+    }
+    function shouldContinueWithoutData(parser) {
+      return this.should_continue_without_data(parser) !== 0;
+    }
+    function isConnect(parser) {
+      return this.is_connect(parser) !== 0;
+    }
+    function isDebug(parser) {
+      return this.is_debug(parser) !== 0;
+    }
+    function shouldSkipBody(parser) {
+      return this.should_skip_body(parser) !== 0;
+    }
+    function getState(parser) {
+      return this.get_state(parser) >>> 0;
+    }
+    function getPosition(parser) {
+      return this.get_position(parser) >>> 0;
+    }
+    function getParsed(parser) {
+      return BigInt.asUintN(64, this.get_parsed(parser));
+    }
+    function getErrorCode(parser) {
+      return this.get_error_code(parser) >>> 0;
+    }
+    function getMethod(parser) {
+      return this.get_method(parser) >>> 0;
+    }
+    function getStatus(parser) {
+      return this.get_status(parser) >>> 0;
+    }
+    function hasConnectionClose(parser) {
+      return this.has_connection_close(parser) !== 0;
+    }
+    function hasConnectionUpgrade(parser) {
+      return this.has_connection_upgrade(parser) !== 0;
+    }
+    function getContentLength(parser) {
+      return BigInt.asUintN(64, this.get_content_length(parser));
+    }
+    function getChunkSize(parser) {
+      return BigInt.asUintN(64, this.get_chunk_size(parser));
+    }
+    function getRemainingContentLength(parser) {
+      return BigInt.asUintN(64, this.get_remaining_content_length(parser));
+    }
+    function getRemainingChunkSize(parser) {
+      return BigInt.asUintN(64, this.get_remaining_chunk_size(parser));
+    }
+    function hasContentLength(parser) {
+      return this.has_content_length(parser) !== 0;
+    }
+    function hasTransferEncoding(parser) {
+      return this.has_transfer_encoding(parser) !== 0;
+    }
+    function hasChunkedTransferEncoding(parser) {
+      return this.has_chunked_transfer_encoding(parser) !== 0;
+    }
+    function hasUpgrade(parser) {
+      return this.has_upgrade(parser) !== 0;
+    }
+    function hasTrailers(parser) {
+      return this.has_trailers(parser) !== 0;
+    }
+    function getErrorDescription(parser) {
+      const raw = this.get_error_description_raw(parser);
+      const len = Number(BigInt.asUintN(32, raw));
+      const ptr = Number(raw >> 32n);
+      return textDecoder.decode(new Uint8Array(this.memory.buffer, ptr, len));
+    }
+    function setShouldAutodetect(parser, value) {
+      this.set_should_autodetect(parser, value);
+    }
+    function setShouldContinueWithoutData(parser, value) {
+      this.set_should_continue_without_data(parser, value);
+    }
+    function setIsRequest(parser, value) {
+      this.set_is_request(parser, value);
+    }
+    function setIsConnect(parser, value) {
+      this.set_is_connect(parser, value);
+    }
+    function setDebug(parser, value) {
+      this.set_debug(parser, value);
+    }
+    function setShouldManageUnconsumed(parser, value) {
+      this.set_should_manage_unconsumed(parser, value);
+    }
+    function setShouldSuspendAfterHeaders(parser, value) {
+      this.set_should_suspend_after_headers(parser, value);
+    }
+    function setMaxStartLineLength(parser, value) {
+      this.set_max_start_line_length(parser, value);
+    }
+    function setMaxHeaderLength(parser, value) {
+      this.set_max_header_length(parser, value);
+    }
+    function setMaxBodyPayload(parser, value) {
+      this.set_max_body_payload(parser, value);
+    }
+    function setShouldSkipBody(parser, value) {
+      this.set_should_skip_body(parser, value);
+    }
+    function setActiveCallbacks(parser, value) {
+      this.set_active_callbacks(parser, value);
+    }
+    function setActiveEvents(parser, value) {
+      this.set_active_events(parser, value);
+    }
+    function simpleCreate(spans, create3) {
+      const parser = create3();
+      spans[parser] = [];
+      this.setActiveCallbacks(parser, this.CALLBACK_ACTIVE_ALL);
+      return parser;
+    }
+    function simpleDestroy(spans, destroy2, parser) {
+      spans[parser] = void 0;
+      destroy2(parser);
+    }
+    function noop2() {
+    }
+    function setup(env = {}) {
+      let { logger: logOption, ...instanceEnvironment } = env;
+      let logger = noop2;
+      const context = {};
+      if (logOption) {
+        if (typeof logOption !== "function") {
+          logOption = console.log;
+        }
+        logger = log.bind(context, logOption);
+      }
+      const instance = new WebAssembly.Instance(wasmModule, {
+        env: {
+          logger,
+          on_error: noop2,
+          on_finish: noop2,
+          on_message_start: noop2,
+          on_message_complete: noop2,
+          on_request: noop2,
+          on_response: noop2,
+          on_reset: noop2,
+          on_method: noop2,
+          on_url: noop2,
+          on_protocol: noop2,
+          on_version: noop2,
+          on_status: noop2,
+          on_reason: noop2,
+          on_header_name: noop2,
+          on_header_value: noop2,
+          on_headers: noop2,
+          on_connect: noop2,
+          on_upgrade: noop2,
+          on_chunk_length: noop2,
+          on_chunk_extension_name: noop2,
+          on_chunk_extension_value: noop2,
+          on_chunk: noop2,
+          on_body: noop2,
+          on_data: noop2,
+          on_trailer_name: noop2,
+          on_trailer_value: noop2,
+          on_trailers: noop2,
+          on_state_change: noop2,
+          ...instanceEnvironment
+        }
+      });
+      const wasm = instance.exports;
+      context.memory = wasm.memory;
+      const milo = {
+        version: {
+          raw: "0.9.0",
+          major: 0,
+          minor: 9,
+          patch: 0,
+          prerelease: ""
+        },
+        METHOD_OTHER: 0,
+        METHOD_GET: 1,
+        METHOD_HEAD: 2,
+        METHOD_POST: 3,
+        METHOD_PUT: 4,
+        METHOD_DELETE: 5,
+        METHOD_CONNECT: 6,
+        METHOD_OPTIONS: 7,
+        METHOD_TRACE: 8,
+        METHOD_PATCH: 9,
+        METHOD_PRI: 10,
+        CALLBACK_ON_ERROR: 0,
+        CALLBACK_ON_FINISH: 1,
+        CALLBACK_ON_MESSAGE_START: 2,
+        CALLBACK_ON_MESSAGE_COMPLETE: 3,
+        CALLBACK_ON_REQUEST: 4,
+        CALLBACK_ON_RESPONSE: 5,
+        CALLBACK_ON_RESET: 6,
+        CALLBACK_ON_METHOD: 7,
+        CALLBACK_ON_URL: 8,
+        CALLBACK_ON_PROTOCOL: 9,
+        CALLBACK_ON_VERSION: 10,
+        CALLBACK_ON_STATUS: 11,
+        CALLBACK_ON_REASON: 12,
+        CALLBACK_ON_HEADER_NAME: 13,
+        CALLBACK_ON_HEADER_VALUE: 14,
+        CALLBACK_ON_HEADERS: 15,
+        CALLBACK_ON_CONNECT: 16,
+        CALLBACK_ON_UPGRADE: 17,
+        CALLBACK_ON_CHUNK_LENGTH: 18,
+        CALLBACK_ON_CHUNK_EXTENSION_NAME: 19,
+        CALLBACK_ON_CHUNK_EXTENSION_VALUE: 20,
+        CALLBACK_ON_CHUNK: 21,
+        CALLBACK_ON_BODY: 22,
+        CALLBACK_ON_DATA: 23,
+        CALLBACK_ON_TRAILER_NAME: 24,
+        CALLBACK_ON_TRAILER_VALUE: 25,
+        CALLBACK_ON_TRAILERS: 26,
+        CALLBACK_ON_STATE_CHANGE: 27,
+        EVENT_END: 0,
+        EVENT_ERROR: 1,
+        EVENT_FINISH: 2,
+        EVENT_MESSAGE_START: 3,
+        EVENT_MESSAGE_COMPLETE: 4,
+        EVENT_REQUEST: 5,
+        EVENT_RESPONSE: 6,
+        EVENT_RESET: 7,
+        EVENT_METHOD: 8,
+        EVENT_URL: 9,
+        EVENT_PROTOCOL: 10,
+        EVENT_VERSION: 11,
+        EVENT_STATUS: 12,
+        EVENT_REASON: 13,
+        EVENT_HEADER_NAME: 14,
+        EVENT_HEADER_VALUE: 15,
+        EVENT_HEADERS: 16,
+        EVENT_CONNECT: 17,
+        EVENT_UPGRADE: 18,
+        EVENT_CHUNK_LENGTH: 19,
+        EVENT_CHUNK_EXTENSION_NAME: 20,
+        EVENT_CHUNK_EXTENSION_VALUE: 21,
+        EVENT_CHUNK: 22,
+        EVENT_BODY: 23,
+        EVENT_DATA: 24,
+        EVENT_TRAILER_NAME: 25,
+        EVENT_TRAILER_VALUE: 26,
+        EVENT_TRAILERS: 27,
+        EVENT_STATE_CHANGE: 28,
+        CALLBACK_ACTIVE_NONE: 0n,
+        EVENT_ACTIVE_NONE: 0n,
+        CALLBACK_ACTIVE_ON_ERROR: 1n,
+        EVENT_ACTIVE_ON_ERROR: 1n,
+        CALLBACK_ACTIVE_ON_FINISH: 2n,
+        EVENT_ACTIVE_ON_FINISH: 2n,
+        CALLBACK_ACTIVE_ON_MESSAGE_START: 4n,
+        EVENT_ACTIVE_ON_MESSAGE_START: 4n,
+        CALLBACK_ACTIVE_ON_MESSAGE_COMPLETE: 8n,
+        EVENT_ACTIVE_ON_MESSAGE_COMPLETE: 8n,
+        CALLBACK_ACTIVE_ON_REQUEST: 16n,
+        EVENT_ACTIVE_ON_REQUEST: 16n,
+        CALLBACK_ACTIVE_ON_RESPONSE: 32n,
+        EVENT_ACTIVE_ON_RESPONSE: 32n,
+        CALLBACK_ACTIVE_ON_RESET: 64n,
+        EVENT_ACTIVE_ON_RESET: 64n,
+        CALLBACK_ACTIVE_ON_METHOD: 128n,
+        EVENT_ACTIVE_ON_METHOD: 128n,
+        CALLBACK_ACTIVE_ON_URL: 256n,
+        EVENT_ACTIVE_ON_URL: 256n,
+        CALLBACK_ACTIVE_ON_PROTOCOL: 512n,
+        EVENT_ACTIVE_ON_PROTOCOL: 512n,
+        CALLBACK_ACTIVE_ON_VERSION: 1024n,
+        EVENT_ACTIVE_ON_VERSION: 1024n,
+        CALLBACK_ACTIVE_ON_STATUS: 2048n,
+        EVENT_ACTIVE_ON_STATUS: 2048n,
+        CALLBACK_ACTIVE_ON_REASON: 4096n,
+        EVENT_ACTIVE_ON_REASON: 4096n,
+        CALLBACK_ACTIVE_ON_HEADER_NAME: 8192n,
+        EVENT_ACTIVE_ON_HEADER_NAME: 8192n,
+        CALLBACK_ACTIVE_ON_HEADER_VALUE: 16384n,
+        EVENT_ACTIVE_ON_HEADER_VALUE: 16384n,
+        CALLBACK_ACTIVE_ON_HEADERS: 32768n,
+        EVENT_ACTIVE_ON_HEADERS: 32768n,
+        CALLBACK_ACTIVE_ON_CONNECT: 65536n,
+        EVENT_ACTIVE_ON_CONNECT: 65536n,
+        CALLBACK_ACTIVE_ON_UPGRADE: 131072n,
+        EVENT_ACTIVE_ON_UPGRADE: 131072n,
+        CALLBACK_ACTIVE_ON_CHUNK_LENGTH: 262144n,
+        EVENT_ACTIVE_ON_CHUNK_LENGTH: 262144n,
+        CALLBACK_ACTIVE_ON_CHUNK_EXTENSION_NAME: 524288n,
+        EVENT_ACTIVE_ON_CHUNK_EXTENSION_NAME: 524288n,
+        CALLBACK_ACTIVE_ON_CHUNK_EXTENSION_VALUE: 1048576n,
+        EVENT_ACTIVE_ON_CHUNK_EXTENSION_VALUE: 1048576n,
+        CALLBACK_ACTIVE_ON_CHUNK: 2097152n,
+        EVENT_ACTIVE_ON_CHUNK: 2097152n,
+        CALLBACK_ACTIVE_ON_BODY: 4194304n,
+        EVENT_ACTIVE_ON_BODY: 4194304n,
+        CALLBACK_ACTIVE_ON_DATA: 8388608n,
+        EVENT_ACTIVE_ON_DATA: 8388608n,
+        CALLBACK_ACTIVE_ON_TRAILER_NAME: 16777216n,
+        EVENT_ACTIVE_ON_TRAILER_NAME: 16777216n,
+        CALLBACK_ACTIVE_ON_TRAILER_VALUE: 33554432n,
+        EVENT_ACTIVE_ON_TRAILER_VALUE: 33554432n,
+        CALLBACK_ACTIVE_ON_TRAILERS: 67108864n,
+        EVENT_ACTIVE_ON_TRAILERS: 67108864n,
+        CALLBACK_ACTIVE_ON_STATE_CHANGE: 134217728n,
+        EVENT_ACTIVE_ON_STATE_CHANGE: 134217728n,
+        CALLBACK_ACTIVE_ALL: 268435455n,
+        EVENT_ACTIVE_ALL: 268435455n,
+        ERROR_NONE: 0,
+        ERROR_USER: 1,
+        ERROR_CALLBACK_ERROR: 2,
+        ERROR_UNEXPECTED_STATE: 3,
+        ERROR_UNEXPECTED_DATA: 4,
+        ERROR_UNEXPECTED_EOF: 5,
+        ERROR_UNEXPECTED_CHARACTER: 6,
+        ERROR_UNEXPECTED_CONTENT_LENGTH: 7,
+        ERROR_UNEXPECTED_TRANSFER_ENCODING: 8,
+        ERROR_UNEXPECTED_CONTENT: 9,
+        ERROR_UNEXPECTED_TRAILERS: 10,
+        ERROR_INVALID_VERSION: 11,
+        ERROR_INVALID_STATUS: 12,
+        ERROR_INVALID_CONTENT_LENGTH: 13,
+        ERROR_INVALID_TRANSFER_ENCODING: 14,
+        ERROR_INVALID_CHUNK_SIZE: 15,
+        ERROR_MISSING_CONNECTION_UPGRADE: 16,
+        ERROR_UNSUPPORTED_HTTP_VERSION: 17,
+        STATE_START: 0,
+        STATE_FINISH: 1,
+        STATE_ERROR: 2,
+        STATE_REQUEST_LINE: 3,
+        STATE_STATUS_LINE: 4,
+        STATE_HTTP2_PREFACE: 5,
+        STATE_HEADER: 6,
+        STATE_BODY_DECISION: 7,
+        STATE_BODY_VIA_CONTENT_LENGTH: 8,
+        STATE_BODY_WITH_NO_LENGTH: 9,
+        STATE_CHUNK_HEADER: 10,
+        STATE_CHUNK_EXTENSIONS: 11,
+        STATE_CHUNK_DATA: 12,
+        STATE_TRAILER: 13,
+        STATE_TUNNEL: 14,
+        PARSER_FIELD_MAX_START_LINE_LENGTH: 0,
+        PARSER_FIELD_MAX_HEADER_LENGTH: 4,
+        PARSER_FIELD_MAX_BODY_PAYLOAD: 8,
+        PARSER_FIELD_AUTODETECT: 16,
+        PARSER_FIELD_IS_REQUEST: 17,
+        PARSER_FIELD_SUSPEND_AFTER_HEADERS: 18,
+        PARSER_FIELD_MANAGE_UNCONSUMED: 19,
+        PARSER_FIELD_CONTINUE_WITHOUT_DATA: 20,
+        PARSER_FIELD_IS_CONNECT: 21,
+        PARSER_FIELD_SKIP_BODY: 22,
+        PARSER_FIELD_DEBUG: 23,
+        PARSER_FIELD_PARSED: 24,
+        PARSER_FIELD_POSITION: 32,
+        PARSER_FIELD_STATE: 36,
+        PARSER_FIELD_PAUSED: 37,
+        PARSER_FIELD_ERROR_CODE: 38,
+        PARSER_FIELD_CONTENT_LENGTH: 40,
+        PARSER_FIELD_CHUNK_SIZE: 48,
+        PARSER_FIELD_REMAINING_CONTENT_LENGTH: 56,
+        PARSER_FIELD_REMAINING_CHUNK_SIZE: 64,
+        PARSER_FIELD_STATUS: 72,
+        PARSER_FIELD_METHOD: 76,
+        PARSER_FIELD_HAS_CONTENT_LENGTH: 77,
+        PARSER_FIELD_HAS_TRANSFER_ENCODING: 78,
+        PARSER_FIELD_HAS_CHUNKED_TRANSFER_ENCODING: 79,
+        PARSER_FIELD_HAS_CONNECTION_CLOSE: 80,
+        PARSER_FIELD_HAS_CONNECTION_UPGRADE: 81,
+        PARSER_FIELD_HAS_UPGRADE: 82,
+        PARSER_FIELD_HAS_TRAILERS: 83,
+        PARSER_FIELD_ACTIVE_CALLBACKS: 88,
+        PARSER_FIELD_ACTIVE_EVENTS: 96,
+        PARSER_FIELD_PTR: 104,
+        PARSER_FIELD_ERROR_DESCRIPTION: 108,
+        PARSER_FIELD_UNCONSUMED: 364,
+        PARSER_FIELD_UNCONSUMED_LEN: 368,
+        PARSER_FIELD_ERROR_DESCRIPTION_LEN: 372,
+        PARSER_FIELD_EVENTS: 376,
+        Errors,
+        Methods,
+        Callbacks,
+        CallbackActives,
+        Events,
+        EventActives,
+        States,
+        ParserFields,
+        isAutodetect: isAutodetect.bind(wasm),
+        isRequest: isRequest2.bind(wasm),
+        isPaused: isPaused.bind(wasm),
+        shouldManageUnconsumed: shouldManageUnconsumed.bind(wasm),
+        shouldSuspendAfterHeaders: shouldSuspendAfterHeaders.bind(wasm),
+        getMaxStartLineLength: getMaxStartLineLength.bind(wasm),
+        getMaxHeaderLength: getMaxHeaderLength.bind(wasm),
+        getMaxBodyPayload: getMaxBodyPayload.bind(wasm),
+        shouldContinueWithoutData: shouldContinueWithoutData.bind(wasm),
+        isConnect: isConnect.bind(wasm),
+        isDebug: isDebug.bind(wasm),
+        shouldSkipBody: shouldSkipBody.bind(wasm),
+        getState: getState.bind(wasm),
+        getPosition: getPosition.bind(wasm),
+        getParsed: getParsed.bind(wasm),
+        getErrorCode: getErrorCode.bind(wasm),
+        getMethod: getMethod.bind(wasm),
+        getStatus: getStatus.bind(wasm),
+        hasConnectionClose: hasConnectionClose.bind(wasm),
+        hasConnectionUpgrade: hasConnectionUpgrade.bind(wasm),
+        getContentLength: getContentLength.bind(wasm),
+        getChunkSize: getChunkSize.bind(wasm),
+        getRemainingContentLength: getRemainingContentLength.bind(wasm),
+        getRemainingChunkSize: getRemainingChunkSize.bind(wasm),
+        hasContentLength: hasContentLength.bind(wasm),
+        hasTransferEncoding: hasTransferEncoding.bind(wasm),
+        hasChunkedTransferEncoding: hasChunkedTransferEncoding.bind(wasm),
+        hasUpgrade: hasUpgrade.bind(wasm),
+        hasTrailers: hasTrailers.bind(wasm),
+        getErrorDescription: getErrorDescription.bind(wasm),
+        setShouldAutodetect: setShouldAutodetect.bind(wasm),
+        setShouldContinueWithoutData: setShouldContinueWithoutData.bind(wasm),
+        setIsRequest: setIsRequest.bind(wasm),
+        setIsConnect: setIsConnect.bind(wasm),
+        setDebug: setDebug.bind(wasm),
+        setShouldManageUnconsumed: setShouldManageUnconsumed.bind(wasm),
+        setShouldSuspendAfterHeaders: setShouldSuspendAfterHeaders.bind(wasm),
+        setMaxStartLineLength: setMaxStartLineLength.bind(wasm),
+        setMaxHeaderLength: setMaxHeaderLength.bind(wasm),
+        setMaxBodyPayload: setMaxBodyPayload.bind(wasm),
+        setShouldSkipBody: setShouldSkipBody.bind(wasm),
+        setActiveCallbacks: setActiveCallbacks.bind(wasm),
+        setActiveEvents: setActiveEvents.bind(wasm),
+        memory: wasm.memory,
+        alloc: alloc.bind(wasm),
+        dealloc: dealloc.bind(wasm),
+        create: create2.bind(wasm),
+        destroy: destroy.bind(wasm),
+        parse: parse.bind(wasm),
+        fail: fail.bind(wasm),
+        hasDebug: hasDebug.bind(wasm),
+        clear: wasm.clear,
+        complete: wasm.complete,
+        finish: wasm.finish,
+        pause: wasm.pause,
+        reset: wasm.reset,
+        resume: wasm.resume
+      };
+      return milo;
+    }
+    function simple() {
+      const spans = {};
+      const milo = setup({
+        /* REPLACE: callbacks:simple */
+      });
+      milo.spans = spans;
+      milo.create = simpleCreate.bind(milo, spans, milo.create);
+      milo.destroy = simpleDestroy.bind(milo, spans, milo.destroy);
+      return milo;
+    }
+    module2.exports = { wasmModule, noop: noop2, setup, simple };
+  }
+});
+
+// node_modules/undici/lib/dispatcher/parser-h1.js
+var require_parser_h1 = __commonJS({
+  "node_modules/undici/lib/dispatcher/parser-h1.js"(exports2, module2) {
+    "use strict";
+    var assert = require("node:assert");
+    var util4 = require_util9();
+    var timers = require_timers2();
+    var {
+      HeadersTimeoutError,
+      HeadersOverflowError,
+      SocketError,
+      InformationalError,
+      BodyTimeoutError,
+      HTTPParserError,
+      ResponseContentLengthMismatchError,
+      ResponseExceededMaxSizeError
+    } = require_errors2();
+    var {
+      kUrl,
+      kReset,
+      kClient,
+      kParser,
+      kBlocking,
+      kRunning,
+      kWriting,
+      kQueue,
+      kKeepAliveDefaultTimeout,
+      kRunningIdx,
+      kError,
+      kPipelining,
+      kSocket,
+      kKeepAliveTimeoutValue,
+      kKeepAliveMaxTimeout,
+      kKeepAliveTimeoutThreshold,
+      kBodyTimeout,
+      kMaxResponseSize,
+      kResume,
+      kHTTPContext,
+      kMaxHeadersSize
+    } = require_symbols6();
+    var FastBuffer = Buffer[Symbol.species];
+    var removeAllListeners = util4.removeAllListeners;
+    var kPausedByHandler = /* @__PURE__ */ Symbol("kPausedByHandler");
+    var BUFFER_PAGE_SIZE = 4096;
+    var INITIAL_BUFFER_SIZE = 128 * 1024;
+    var EMPTY_BUF = Buffer.alloc(0);
+    var BODY_KIND_CONTENT_LENGTH = 0;
+    var EVENT_RANGE_SIZE = 9;
+    var EVENT_HEADERS_SIZE = 19;
+    var miloPackage;
+    var useWasmSIMD = process.arch !== "ppc64";
+    if (process.env.UNDICI_NO_WASM_SIMD === "1") {
+      useWasmSIMD = false;
+    } else if (process.env.UNDICI_NO_WASM_SIMD === "0") {
+      useWasmSIMD = true;
+    }
+    var USE_NATIVE_TIMER = 0;
+    var USE_FAST_TIMER = 1;
+    var TIMEOUT_HEADERS = 2 | USE_FAST_TIMER;
+    var TIMEOUT_BODY = 4 | USE_FAST_TIMER;
+    var TIMEOUT_KEEP_ALIVE = 8 | USE_NATIVE_TIMER;
+    var miloEnabled = process.env.UNDICI_USE_MILO === "1" || process.env.UNDICI_USE_MILO === "true";
+    var miloInstance = null;
+    var currentBuffer = null;
+    var currentBufferSize = 0;
+    var currentBufferPtr = null;
+    var currentBufferRef = null;
+    function onParserTimeout(parserWeakRef) {
+      const parser = parserWeakRef.deref ? parserWeakRef.deref() : parserWeakRef;
+      if (!parser) {
+        return;
+      }
+      const { socket, timeoutType, client, paused } = parser;
+      if (timeoutType === TIMEOUT_HEADERS) {
+        if (!socket[kWriting] || socket.writableNeedDrain || client[kRunning] > 1) {
+          assert(!paused, "cannot be paused while waiting for headers");
+          util4.destroy(socket, new HeadersTimeoutError());
+        }
+      } else if (timeoutType === TIMEOUT_BODY) {
+        if (!paused) {
+          util4.destroy(socket, new BodyTimeoutError());
+        }
+      } else if (timeoutType === TIMEOUT_KEEP_ALIVE) {
+        assert(client[kRunning] === 0 && client[kKeepAliveTimeoutValue]);
+        util4.destroy(socket, new InformationalError("socket idle timeout"));
+      }
+    }
+    function getMilo() {
+      if (miloInstance) {
+        return miloInstance;
+      }
+      if (useWasmSIMD) {
+        try {
+          miloPackage = require_simd();
+        } catch {
+        }
+      }
+      miloPackage = miloPackage || require_no_simd();
+      miloInstance = miloPackage.setup();
+      return miloInstance;
+    }
+    var H1Parser = class {
+      constructor(client, socket) {
+        this.milo = getMilo();
+        this.client = client;
+        this.socket = socket;
+        this.parser = this.milo.create();
+        this.events = new FastBuffer(
+          this.milo.memory.buffer,
+          this.parser + this.milo.ParserFields.EVENTS,
+          4
+        ).readUInt32LE(0);
+        this.milo.setShouldAutodetect(this.parser, false);
+        this.milo.setIsRequest(this.parser, false);
+        this.milo.setShouldManageUnconsumed(this.parser, false);
+        this.milo.setShouldSuspendAfterHeaders(this.parser, true);
+        this.milo.setMaxHeaderLength(this.parser, client[kMaxHeadersSize]);
+        this.milo.setActiveEvents(
+          this.parser,
+          this.milo.EVENT_ACTIVE_ON_ERROR | this.milo.EVENT_ACTIVE_ON_MESSAGE_COMPLETE | this.milo.EVENT_ACTIVE_ON_REASON | this.milo.EVENT_ACTIVE_ON_HEADER_NAME | this.milo.EVENT_ACTIVE_ON_HEADER_VALUE | this.milo.EVENT_ACTIVE_ON_HEADERS | this.milo.EVENT_ACTIVE_ON_DATA | this.milo.EVENT_ACTIVE_ON_TRAILER_NAME | this.milo.EVENT_ACTIVE_ON_TRAILER_VALUE
+        );
+        this.timeout = null;
+        this.timeoutWeakRef = new WeakRef(this);
+        this.timeoutValue = null;
+        this.timeoutType = null;
+        this.statusCode = 0;
+        this.statusText = "";
+        this.upgrade = false;
+        this.responseStarted = false;
+        this.pausedByParser = false;
+        this.pauseStateIsStart = false;
+        this.headers = [];
+        this.trailers = [];
+        this.headersSize = 0;
+        this.trailersSize = 0;
+        this.headersMaxSize = client[kMaxHeadersSize];
+        this.shouldKeepAlive = false;
+        this.paused = false;
+        this.errored = false;
+        this.waitingForMoreData = 0;
+        this.resume = this.resume.bind(this);
+        this.bytesRead = 0;
+        this.keepAlive = "";
+        this.connection = "";
+        this.contentLength = -1;
+        this.maxResponseSize = client[kMaxResponseSize];
+        this.directBodyRemaining = 0;
+        this.directBodyCompletePending = false;
+        this.headersSuspended = false;
+        this.skipBody = false;
+        this[kPausedByHandler] = false;
+        if (INITIAL_BUFFER_SIZE > currentBufferSize || currentBuffer.buffer !== this.milo.memory.buffer) {
+          this.ensureBuffers(INITIAL_BUFFER_SIZE);
+        } else {
+          this.updateBuffers();
+        }
+      }
+      setTimeout(delay, type) {
+        if (delay !== this.timeoutValue || type & USE_FAST_TIMER ^ this.timeoutType & USE_FAST_TIMER) {
+          if (this.timeout) {
+            timers.clearTimeout(this.timeout);
+            this.timeout = null;
+          }
+          if (delay) {
+            if (type & USE_FAST_TIMER) {
+              this.timeout = timers.setFastTimeout(
+                onParserTimeout,
+                delay,
+                this.timeoutWeakRef
+              );
+            } else {
+              this.timeout = setTimeout(
+                onParserTimeout,
+                delay,
+                this.timeoutWeakRef
+              );
+              this.timeout?.unref();
+            }
+          }
+          this.timeoutValue = delay;
+        } else if (this.timeout?.refresh) {
+          this.timeout.refresh();
+        }
+        this.timeoutType = type;
+      }
+      ensureBuffers(size) {
+        const { milo } = this;
+        if (currentBufferPtr != null) {
+          milo.dealloc(currentBufferPtr, currentBufferSize);
+        }
+        currentBufferSize = Math.ceil(size / BUFFER_PAGE_SIZE) * BUFFER_PAGE_SIZE;
+        currentBufferPtr = milo.alloc(currentBufferSize);
+        currentBuffer = new FastBuffer(
+          milo.memory.buffer,
+          currentBufferPtr,
+          currentBufferSize
+        );
+        this.updateBuffers();
+      }
+      updateBuffers() {
+        this.parserFields = new FastBuffer(this.milo.memory.buffer, this.parser);
+        this.parserEvents = new FastBuffer(
+          this.milo.memory.buffer,
+          this.events,
+          64 * 1024
+        );
+      }
+      resume() {
+        if (this.socket.destroyed || !this.paused) {
+          return;
+        }
+        this.milo.resume(this.parser);
+        assert(this.timeoutType === TIMEOUT_BODY);
+        if (this.timeout?.refresh) {
+          this.timeout.refresh();
+        }
+        this.paused = false;
+        if (this.directBodyCompletePending) {
+          try {
+            this.completeDirectBody();
+          } catch (err) {
+            util4.destroy(this.socket, err);
+            return;
+          }
+          if (this.paused) {
+            return;
+          }
+        }
+        this.readMore();
+      }
+      readMore() {
+        if (this.paused || !this.parser) {
+          return;
+        }
+        while (!this.paused && this.parser) {
+          if (this.waitingForMoreData && this.socket.readableLength <= this.waitingForMoreData) {
+            break;
+          }
+          this.waitingForMoreData = 0;
+          const chunk = this.socket.read();
+          if (chunk === null) {
+            break;
+          }
+          if (this.execute(chunk) === false) {
+            break;
+          }
+        }
+      }
+      execute(data) {
+        const available = data.length;
+        assert(!this.paused);
+        const { socket, milo } = this;
+        try {
+          if (this.directBodyRemaining > 0) {
+            return this.consumeDirectBody(data);
+          }
+          if (currentBuffer.buffer !== milo.memory.buffer) {
+            currentBuffer = new FastBuffer(
+              milo.memory.buffer,
+              currentBufferPtr,
+              currentBufferSize
+            );
+            this.updateBuffers();
+          } else if (this.parserEvents.buffer !== milo.memory.buffer) {
+            this.updateBuffers();
+          }
+          let offset = 0;
+          let parseLen = available;
+          const headersEnd = this.statusCode === 0 ? data.indexOf("\r\n\r\n") : -1;
+          if (headersEnd !== -1) {
+            parseLen = headersEnd + 4;
+          }
+          for (; ; ) {
+            if (parseLen > currentBufferSize) {
+              this.ensureBuffers(parseLen);
+            }
+            const parseData = data.subarray(offset, offset + parseLen);
+            currentBuffer.set(parseData);
+            currentBufferRef = parseData;
+            const consumed = milo.parse(this.parser, currentBufferPtr, parseLen);
+            this.drainEvents();
+            const consumedTotal = offset + consumed;
+            if (this.errored || consumed === 0 && this.parserFields[milo.ParserFields.ERROR_CODE] !== milo.ERROR_NONE) {
+              throw this.createError(data.subarray(consumedTotal));
+            } else if (this.upgrade) {
+              this.onUpgrade(data.subarray(consumedTotal));
+              return false;
+            } else if (this.directBodyCompletePending) {
+              this.completeDirectBody();
+              if (this.paused) {
+                return false;
+              }
+            } else if (this.pausedByParser) {
+              this.pausedByParser = false;
+              this.headersSuspended = false;
+              if (this[kPausedByHandler] && this.pauseStateIsStart) {
+                this.pauseStateIsStart = false;
+                milo.resume(this.parser);
+                this[kPausedByHandler] = false;
+                return false;
+              }
+              this.pauseStateIsStart = false;
+              this.paused = true;
+              socket.unshift(data.subarray(consumedTotal));
+              return false;
+            }
+            if (this.directBodyRemaining > 0) {
+              return this.consumeDirectBody(data.subarray(consumedTotal));
+            }
+            if (consumed < parseLen) {
+              const remaining = data.subarray(consumedTotal);
+              socket.unshift(remaining);
+              this.waitingForMoreData = consumed === 0 ? remaining.length : 0;
+              return false;
+            }
+            offset = consumedTotal;
+            if (offset >= available) {
+              if (this.headersSuspended) {
+                this.headersSuspended = false;
+                parseLen = 0;
+                continue;
+              }
+              return true;
+            }
+            this.headersSuspended = false;
+            parseLen = available - offset;
+          }
+        } catch (err) {
+          util4.destroy(socket, err);
+          return false;
+        } finally {
+          currentBufferRef = null;
+        }
+      }
+      consumeDirectBody(data) {
+        const { socket, client, maxResponseSize } = this;
+        const available = data.length;
+        const len = Math.min(available, this.directBodyRemaining);
+        if (this.timeout?.refresh) {
+          this.timeout.refresh();
+        }
+        if (len > 0) {
+          const request = client[kQueue][client[kRunningIdx]];
+          assert(request);
+          assert(this.timeoutType === TIMEOUT_BODY);
+          assert(this.statusCode >= 200);
+          if (maxResponseSize > -1 && this.bytesRead + len > maxResponseSize) {
+            throw new ResponseExceededMaxSizeError();
+          }
+          this.bytesRead += len;
+          this.directBodyRemaining -= len;
+          if (request.onResponseData(data.subarray(0, len)) === false) {
+            this.directBodyCompletePending = this.directBodyRemaining === 0;
+            this.pauseParser();
+            this[kPausedByHandler] = true;
+            this.pausedByParser = false;
+            this.paused = true;
+            if (len < available) {
+              socket.unshift(data.subarray(len));
+            }
+            return false;
+          }
+        }
+        if (this.directBodyRemaining === 0) {
+          this.completeDirectBody();
+          const remaining = data.subarray(len);
+          if (this.errored || this.parserFields[this.milo.ParserFields.ERROR_CODE] !== this.milo.ERROR_NONE) {
+            throw this.createError(remaining);
+          } else if (this.pausedByParser) {
+            this.pausedByParser = false;
+            this.pauseStateIsStart = false;
+            this.paused = true;
+            if (remaining.length > 0) {
+              socket.unshift(remaining);
+            }
+            return false;
+          }
+          if (remaining.length > 0) {
+            socket.unshift(remaining);
+            return false;
+          }
+        }
+        return true;
+      }
+      completeDirectBody() {
+        const { milo } = this;
+        if (currentBuffer.buffer !== milo.memory.buffer) {
+          currentBuffer = new FastBuffer(
+            milo.memory.buffer,
+            currentBufferPtr,
+            currentBufferSize
+          );
+          this.updateBuffers();
+        } else if (this.parserEvents.buffer !== milo.memory.buffer) {
+          this.updateBuffers();
+        }
+        this.directBodyCompletePending = false;
+        currentBufferRef = EMPTY_BUF;
+        milo.complete(this.parser);
+        this.drainEvents();
+      }
+      setShouldSkipBody(value) {
+        if (this.skipBody !== value) {
+          this.skipBody = value;
+          this.milo.setShouldSkipBody(this.parser, value);
+        }
+      }
+      finish() {
+        if (!this.parser) {
+          return null;
+        }
+        if (this.directBodyRemaining > 0) {
+          return new ResponseContentLengthMismatchError();
+        }
+        if (this.parserEvents.buffer !== this.milo.memory.buffer) {
+          this.updateBuffers();
+        }
+        this.milo.finish(this.parser);
+        this.drainEvents();
+        if (!this.errored) {
+          return null;
+        }
+        return this.createError(EMPTY_BUF);
+      }
+      createError(data) {
+        const { contentLength, bytesRead } = this;
+        if (contentLength !== -1 && bytesRead !== contentLength) {
+          return new ResponseContentLengthMismatchError();
+        }
+        const errorCode = this.parserFields[this.milo.ParserFields.ERROR_CODE];
+        const errorName = this.milo.Errors[errorCode];
+        const errorDescription = errorName === "UNEXPECTED_EOF" ? "Invalid EOF state" : this.milo.getErrorDescription(this.parser);
+        const reason = errorName === "UNEXPECTED_EOF" ? errorDescription : errorDescription ? `[ERROR_${errorName}] ${errorDescription}` : `ERROR_${errorName}`;
+        return new HTTPParserError(
+          `Response does not match the HTTP/1.1 protocol (${reason})`,
+          errorName,
+          data
+        );
+      }
+      destroy() {
+        if (this.parser) {
+          this.milo.destroy(this.parser);
+          this.parser = null;
+        }
+        this.timeout && timers.clearTimeout(this.timeout);
+        this.timeout = null;
+        this.timeoutValue = null;
+        this.timeoutType = null;
+        this.paused = false;
+        this.responseStarted = false;
+        this.pausedByParser = false;
+        this.pauseStateIsStart = false;
+        this.connection = "";
+        this.skipBody = false;
+      }
+      pauseParser(stateIsStart = false) {
+        this.milo.pause(this.parser);
+        this.pausedByParser = true;
+        this.pauseStateIsStart = stateIsStart;
+      }
+      drainEvents() {
+        const { socket, client, milo } = this;
+        let cursor = 0;
+        const firstEvent = this.parserEvents[0];
+        if (firstEvent !== milo.EVENT_END && firstEvent !== milo.EVENT_ERROR && !this.responseStarted) {
+          this.responseStarted = true;
+          if (socket.destroyed) {
+            return this.fail(this.milo.ERROR_CALLBACK_ERROR, "Other side closed");
+          }
+          const request = client[kQueue][client[kRunningIdx]];
+          if (!request) {
+            return this.fail(this.milo.ERROR_CALLBACK_ERROR, "Missing request");
+          }
+          request.onResponseStarted();
+        }
+        for (; ; ) {
+          const event = this.parserEvents[cursor];
+          let eventLen = EVENT_RANGE_SIZE;
+          switch (event) {
+            case milo.EVENT_END:
+              return;
+            case milo.EVENT_ERROR:
+              this.errored = true;
+              return;
+            case milo.EVENT_MESSAGE_COMPLETE: {
+              const {
+                client: client2,
+                socket: socket2,
+                statusCode,
+                upgrade,
+                trailers,
+                contentLength,
+                bytesRead,
+                shouldKeepAlive
+              } = this;
+              this.responseStarted = false;
+              if (socket2.destroyed && (!statusCode || shouldKeepAlive)) {
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Other side closed");
+              }
+              if (upgrade) {
+                this.pauseParser();
+                return;
+              }
+              assert(statusCode >= 100);
+              const request = client2[kQueue][client2[kRunningIdx]];
+              assert(request);
+              this.statusCode = 0;
+              this.statusText = "";
+              this.bytesRead = 0;
+              this.contentLength = -1;
+              this.directBodyRemaining = 0;
+              this.directBodyCompletePending = false;
+              this.headersSuspended = false;
+              this.skipBody = false;
+              this.keepAlive = "";
+              this.connection = "";
+              this.trailers = [];
+              this.trailersSize = 0;
+              if (statusCode < 200) {
+                break;
+              }
+              if (request.method !== "HEAD" && contentLength !== -1 && bytesRead !== contentLength) {
+                util4.destroy(socket2, new ResponseContentLengthMismatchError());
+                this.pauseParser();
+                break;
+              }
+              request.onResponseEnd(trailers);
+              client2[kQueue][client2[kRunningIdx]++] = null;
+              if (socket2[kWriting]) {
+                assert(client2[kRunning] === 0);
+                util4.destroy(socket2, new InformationalError("reset"));
+                this.pauseParser(true);
+              } else if (!shouldKeepAlive) {
+                util4.destroy(socket2, new InformationalError("reset"));
+                this.pauseParser(true);
+              } else if (socket2[kReset] && client2[kRunning] === 0) {
+                util4.destroy(socket2, new InformationalError("reset"));
+                this.pauseParser(true);
+              } else if (client2[kPipelining] == null || client2[kPipelining] === 1) {
+                setImmediate(client2[kResume]);
+              } else {
+                client2[kResume]();
+              }
+              break;
+            }
+            case milo.EVENT_REASON: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              this.statusText = new FastBuffer(
+                currentBufferRef.buffer,
+                currentBufferRef.byteOffset + at3,
+                len
+              ).toString();
+              break;
+            }
+            case milo.EVENT_HEADER_NAME: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              const data = len > 0 ? new FastBuffer(
+                currentBufferRef.buffer,
+                currentBufferRef.byteOffset + at3,
+                len
+              ) : EMPTY_BUF;
+              this.headers.push(data);
+              this.headersSize += len;
+              if (this.headersSize >= this.headersMaxSize) {
+                util4.destroy(this.socket, new HeadersOverflowError());
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Headers overflow");
+              }
+              break;
+            }
+            case milo.EVENT_HEADER_VALUE: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              const data = len > 0 ? new FastBuffer(
+                currentBufferRef.buffer,
+                currentBufferRef.byteOffset + at3,
+                len
+              ) : EMPTY_BUF;
+              const key = this.headers[this.headers.length - 1];
+              this.headers.push(data);
+              if (key.length === 10) {
+                const headerName = util4.bufferToLowerCasedHeaderName(key);
+                if (headerName === "keep-alive") {
+                  this.keepAlive += (this.keepAlive.length === 0 ? "" : ",") + data.toString();
+                } else if (headerName === "connection") {
+                  this.connection += (this.connection.length === 0 ? "" : ",") + data.toString();
+                }
+              }
+              this.headersSize += len;
+              if (this.headersSize >= this.headersMaxSize) {
+                util4.destroy(this.socket, new HeadersOverflowError());
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Headers overflow");
+              }
+              break;
+            }
+            case milo.EVENT_HEADERS: {
+              eventLen = EVENT_HEADERS_SIZE;
+              const statusCode = this.parserEvents.readUInt16LE(cursor + 5);
+              const shouldKeepAlive = this.parserEvents[cursor + 7] !== 0;
+              const shouldUpgrade = this.parserEvents[cursor + 8] !== 0;
+              const hasTrailers = this.parserEvents[cursor + 9] !== 0;
+              const bodyKind = this.parserEvents[cursor + 10];
+              const contentLength = this.parserEvents.readUInt32LE(cursor + 11) + this.parserEvents.readUInt32LE(cursor + 15) * 4294967296;
+              const { socket: socket2, client: client2, headers, statusText } = this;
+              if (socket2.destroyed) {
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Other side closed");
+              }
+              const request = client2[kQueue][client2[kRunningIdx]];
+              if (!request) {
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Missing request");
+              }
+              assert(!this.upgrade);
+              assert(this.statusCode < 200);
+              if (statusCode === 100) {
+                util4.destroy(
+                  socket2,
+                  new SocketError("bad response", util4.getSocketInfo(socket2))
+                );
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Bad response");
+              }
+              if (shouldUpgrade && !request.upgrade) {
+                util4.destroy(
+                  socket2,
+                  new SocketError("bad upgrade", util4.getSocketInfo(socket2))
+                );
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Bad upgrade");
+              }
+              assert(this.timeoutType === TIMEOUT_HEADERS);
+              this.statusCode = statusCode;
+              this.shouldKeepAlive = shouldKeepAlive || request.method === "HEAD" && !socket2[kReset] && /(?:^|,)[\t ]*keep-alive[\t ]*(?:,|$)/i.test(this.connection) && !/(?:^|,)[\t ]*close[\t ]*(?:,|$)/i.test(this.connection);
+              this.contentLength = bodyKind === BODY_KIND_CONTENT_LENGTH ? contentLength : -1;
+              if (this.statusCode >= 200) {
+                const bodyTimeout = request.bodyTimeout != null ? request.bodyTimeout : client2[kBodyTimeout];
+                this.setTimeout(bodyTimeout, TIMEOUT_BODY);
+              } else if (this.timeout?.refresh) {
+                this.timeout.refresh();
+              }
+              if (request.method === "CONNECT") {
+                assert(client2[kRunning] === 1);
+                milo.setIsConnect(this.parser, true);
+                this.upgrade = true;
+                return;
+              }
+              if (shouldUpgrade) {
+                assert(client2[kRunning] === 1);
+                this.upgrade = true;
+                this.pauseParser();
+                return;
+              }
+              this.headers = [];
+              this.headersSize = 0;
+              if (this.shouldKeepAlive && client2[kPipelining]) {
+                const keepAliveTimeout = this.keepAlive ? util4.parseKeepAliveTimeout(this.keepAlive) : null;
+                if (keepAliveTimeout != null) {
+                  const timeout = Math.min(
+                    keepAliveTimeout - client2[kKeepAliveTimeoutThreshold],
+                    client2[kKeepAliveMaxTimeout]
+                  );
+                  if (timeout <= 0) {
+                    socket2[kReset] = true;
+                  } else {
+                    client2[kKeepAliveTimeoutValue] = timeout;
+                  }
+                } else {
+                  client2[kKeepAliveTimeoutValue] = client2[kKeepAliveDefaultTimeout];
+                }
+              } else {
+                socket2[kReset] = true;
+              }
+              const pause = request.onResponseStart(
+                statusCode,
+                headers,
+                this.resume,
+                statusText
+              ) === false;
+              if (request.aborted) {
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Request aborted");
+              }
+              if (request.method === "HEAD" || statusCode < 200) {
+                this.setShouldSkipBody(true);
+              }
+              this.headersSuspended = true;
+              if (!pause && request.method !== "HEAD" && statusCode >= 200 && statusCode !== 204 && statusCode !== 205 && statusCode !== 304 && bodyKind === BODY_KIND_CONTENT_LENGTH && contentLength > 0 && !hasTrailers) {
+                this.directBodyRemaining = contentLength;
+              }
+              if (socket2[kBlocking]) {
+                socket2[kBlocking] = false;
+                client2[kResume]();
+              }
+              if (pause) {
+                this.pauseParser();
+                this[kPausedByHandler] = true;
+              } else if (request.method === "HEAD" || statusCode < 200 || statusCode === 204 || statusCode === 205 || statusCode === 304 || bodyKind === BODY_KIND_CONTENT_LENGTH && contentLength === 0) {
+                this.directBodyCompletePending = true;
+              }
+              break;
+            }
+            case milo.EVENT_DATA: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              const { client: client2, socket: socket2, statusCode, maxResponseSize } = this;
+              if (socket2.destroyed) {
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Other side closed");
+              }
+              const request = client2[kQueue][client2[kRunningIdx]];
+              assert(request);
+              assert(this.timeoutType === TIMEOUT_BODY);
+              if (this.timeout?.refresh) {
+                this.timeout.refresh();
+              }
+              assert(statusCode >= 200);
+              if (maxResponseSize > -1 && this.bytesRead + len > maxResponseSize) {
+                util4.destroy(socket2, new ResponseExceededMaxSizeError());
+                return this.fail(
+                  milo.ERROR_CALLBACK_ERROR,
+                  "Response size exceeded"
+                );
+              }
+              this.bytesRead += len;
+              const buffer = currentBufferRef;
+              if (request.onResponseData(
+                new FastBuffer(buffer.buffer, buffer.byteOffset + at3, len)
+              ) === false) {
+                this.pauseParser();
+                this[kPausedByHandler] = true;
+              }
+              break;
+            }
+            case milo.EVENT_TRAILER_NAME: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              const data = len > 0 ? new FastBuffer(
+                currentBufferRef.buffer,
+                currentBufferRef.byteOffset + at3,
+                len
+              ) : EMPTY_BUF;
+              this.trailers.push(data);
+              this.trailersSize += len;
+              if (this.trailersSize >= this.headersMaxSize) {
+                util4.destroy(this.socket, new HeadersOverflowError());
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Headers overflow");
+              }
+              break;
+            }
+            case milo.EVENT_TRAILER_VALUE: {
+              const at3 = this.parserEvents.readUInt32LE(cursor + 1);
+              const len = this.parserEvents.readUInt32LE(cursor + 5);
+              const data = len > 0 ? new FastBuffer(
+                currentBufferRef.buffer,
+                currentBufferRef.byteOffset + at3,
+                len
+              ) : EMPTY_BUF;
+              this.trailers.push(data);
+              this.trailersSize += len;
+              if (this.trailersSize >= this.headersMaxSize) {
+                util4.destroy(this.socket, new HeadersOverflowError());
+                return this.fail(milo.ERROR_CALLBACK_ERROR, "Headers overflow");
+              }
+              break;
+            }
+            default:
+              return;
+          }
+          cursor += eventLen;
+        }
+      }
+      fail(code, message) {
+        this.milo.fail(this.parser, code, message);
+        this.errored = true;
+      }
+      onUpgrade(head) {
+        const { upgrade, client, socket, headers, statusCode } = this;
+        assert(upgrade);
+        assert(client[kSocket] === socket);
+        assert(!socket.destroyed);
+        assert(!this.paused);
+        const request = client[kQueue][client[kRunningIdx]];
+        assert(request);
+        assert(request.upgrade || request.method === "CONNECT");
+        this.statusCode = 0;
+        this.statusText = "";
+        this.shouldKeepAlive = false;
+        this.headers = [];
+        this.headersSize = 0;
+        socket.unshift(head);
+        socket[kParser].destroy();
+        socket[kParser] = null;
+        socket[kClient] = null;
+        socket[kError] = null;
+        removeAllListeners(socket);
+        client[kSocket] = null;
+        client[kHTTPContext] = null;
+        client[kQueue][client[kRunningIdx]++] = null;
+        client.emit(
+          "disconnect",
+          client[kUrl],
+          [client],
+          new InformationalError("upgrade")
+        );
+        try {
+          request.onRequestUpgrade(statusCode, headers, socket);
+        } catch (err) {
+          util4.destroy(socket, err);
+        }
+        client[kResume]();
+      }
+    };
+    function setMiloEnabled(value) {
+      miloEnabled = value;
+    }
+    function getMiloEnabled() {
+      return miloEnabled;
+    }
+    module2.exports = { H1Parser, getMiloEnabled, setMiloEnabled };
+  }
+});
+
 // node_modules/undici/lib/llhttp/llhttp-wasm.js
 var require_llhttp_wasm2 = __commonJS({
   "node_modules/undici/lib/llhttp/llhttp-wasm.js"(exports2, module2) {
@@ -34278,2297 +39630,6 @@ var require_llhttp_simd_wasm2 = __commonJS({
         return wasmBuffer ? wasmBuffer : wasmBuffer = Buffer3.from(wasmBase64, "base64");
       }
     });
-  }
-});
-
-// node_modules/undici/lib/web/fetch/constants.js
-var require_constants8 = __commonJS({
-  "node_modules/undici/lib/web/fetch/constants.js"(exports2, module2) {
-    "use strict";
-    var corsSafeListedMethods = (
-      /** @type {const} */
-      ["GET", "HEAD", "POST"]
-    );
-    var corsSafeListedMethodsSet = new Set(corsSafeListedMethods);
-    var nullBodyStatus = (
-      /** @type {const} */
-      [101, 204, 205, 304]
-    );
-    var redirectStatus = (
-      /** @type {const} */
-      [301, 302, 303, 307, 308]
-    );
-    var redirectStatusSet = new Set(redirectStatus);
-    var badPorts = (
-      /** @type {const} */
-      [
-        "1",
-        "7",
-        "9",
-        "11",
-        "13",
-        "15",
-        "17",
-        "19",
-        "20",
-        "21",
-        "22",
-        "23",
-        "25",
-        "37",
-        "42",
-        "43",
-        "53",
-        "69",
-        "77",
-        "79",
-        "87",
-        "95",
-        "101",
-        "102",
-        "103",
-        "104",
-        "109",
-        "110",
-        "111",
-        "113",
-        "115",
-        "117",
-        "119",
-        "123",
-        "135",
-        "137",
-        "139",
-        "143",
-        "161",
-        "179",
-        "389",
-        "427",
-        "465",
-        "512",
-        "513",
-        "514",
-        "515",
-        "526",
-        "530",
-        "531",
-        "532",
-        "540",
-        "548",
-        "554",
-        "556",
-        "563",
-        "587",
-        "601",
-        "636",
-        "989",
-        "990",
-        "993",
-        "995",
-        "1719",
-        "1720",
-        "1723",
-        "2049",
-        "3659",
-        "4045",
-        "4190",
-        "5060",
-        "5061",
-        "6000",
-        "6566",
-        "6665",
-        "6666",
-        "6667",
-        "6668",
-        "6669",
-        "6679",
-        "6697",
-        "10080"
-      ]
-    );
-    var badPortsSet = new Set(badPorts);
-    var referrerPolicyTokens = (
-      /** @type {const} */
-      [
-        "no-referrer",
-        "no-referrer-when-downgrade",
-        "same-origin",
-        "origin",
-        "strict-origin",
-        "origin-when-cross-origin",
-        "strict-origin-when-cross-origin",
-        "unsafe-url"
-      ]
-    );
-    var referrerPolicy = (
-      /** @type {const} */
-      [
-        "",
-        ...referrerPolicyTokens
-      ]
-    );
-    var referrerPolicyTokensSet = new Set(referrerPolicyTokens);
-    var requestRedirect = (
-      /** @type {const} */
-      ["follow", "manual", "error"]
-    );
-    var safeMethods = (
-      /** @type {const} */
-      ["GET", "HEAD", "OPTIONS", "TRACE", "QUERY"]
-    );
-    var safeMethodsSet = new Set(safeMethods);
-    var requestMode = (
-      /** @type {const} */
-      ["navigate", "same-origin", "no-cors", "cors"]
-    );
-    var requestCredentials = (
-      /** @type {const} */
-      ["omit", "same-origin", "include"]
-    );
-    var requestCache = (
-      /** @type {const} */
-      [
-        "default",
-        "no-store",
-        "reload",
-        "no-cache",
-        "force-cache",
-        "only-if-cached"
-      ]
-    );
-    var requestBodyHeader = (
-      /** @type {const} */
-      [
-        "content-encoding",
-        "content-language",
-        "content-location",
-        "content-type",
-        // See https://github.com/nodejs/undici/issues/2021
-        // 'Content-Length' is a forbidden header name, which is typically
-        // removed in the Headers implementation. However, undici doesn't
-        // filter out headers, so we add it here.
-        "content-length"
-      ]
-    );
-    var requestDuplex = (
-      /** @type {const} */
-      [
-        "half"
-      ]
-    );
-    var forbiddenMethods = (
-      /** @type {const} */
-      ["CONNECT", "TRACE", "TRACK"]
-    );
-    var forbiddenMethodsSet = new Set(forbiddenMethods);
-    var subresource = (
-      /** @type {const} */
-      [
-        "audio",
-        "audioworklet",
-        "font",
-        "image",
-        "manifest",
-        "paintworklet",
-        "script",
-        "style",
-        "track",
-        "video",
-        "xslt",
-        ""
-      ]
-    );
-    var subresourceSet = new Set(subresource);
-    module2.exports = {
-      subresource,
-      forbiddenMethods,
-      requestBodyHeader,
-      referrerPolicy,
-      requestRedirect,
-      requestMode,
-      requestCredentials,
-      requestCache,
-      redirectStatus,
-      corsSafeListedMethods,
-      nullBodyStatus,
-      safeMethods,
-      badPorts,
-      requestDuplex,
-      subresourceSet,
-      badPortsSet,
-      redirectStatusSet,
-      corsSafeListedMethodsSet,
-      safeMethodsSet,
-      forbiddenMethodsSet,
-      referrerPolicyTokens: referrerPolicyTokensSet
-    };
-  }
-});
-
-// node_modules/undici/lib/web/fetch/global.js
-var require_global3 = __commonJS({
-  "node_modules/undici/lib/web/fetch/global.js"(exports2, module2) {
-    "use strict";
-    var globalOrigin = /* @__PURE__ */ Symbol.for("undici.globalOrigin.1");
-    function getGlobalOrigin() {
-      return globalThis[globalOrigin];
-    }
-    function setGlobalOrigin(newOrigin) {
-      if (newOrigin === void 0) {
-        Object.defineProperty(globalThis, globalOrigin, {
-          value: void 0,
-          writable: true,
-          enumerable: false,
-          configurable: false
-        });
-        return;
-      }
-      const parsedURL = new URL(newOrigin);
-      if (parsedURL.protocol !== "http:" && parsedURL.protocol !== "https:") {
-        throw new TypeError(`Only http & https urls are allowed, received ${parsedURL.protocol}`);
-      }
-      Object.defineProperty(globalThis, globalOrigin, {
-        value: parsedURL,
-        writable: true,
-        enumerable: false,
-        configurable: false
-      });
-    }
-    module2.exports = {
-      getGlobalOrigin,
-      setGlobalOrigin
-    };
-  }
-});
-
-// node_modules/undici/lib/encoding/index.js
-var require_encoding2 = __commonJS({
-  "node_modules/undici/lib/encoding/index.js"(exports2, module2) {
-    "use strict";
-    var textDecoder = new TextDecoder();
-    function utf8DecodeBytes(buffer) {
-      if (buffer.length === 0) {
-        return "";
-      }
-      if (buffer[0] === 239 && buffer[1] === 187 && buffer[2] === 191) {
-        buffer = buffer.subarray(3);
-      }
-      const output = textDecoder.decode(buffer);
-      return output;
-    }
-    module2.exports = {
-      utf8DecodeBytes
-    };
-  }
-});
-
-// node_modules/undici/lib/web/infra/index.js
-var require_infra = __commonJS({
-  "node_modules/undici/lib/web/infra/index.js"(exports2, module2) {
-    "use strict";
-    var assert = require("node:assert");
-    var { utf8DecodeBytes } = require_encoding2();
-    function collectASequenceOfCodePoints(condition, input, position) {
-      let result = "";
-      while (position.position < input.length && condition(input[position.position])) {
-        result += input[position.position];
-        position.position++;
-      }
-      return result;
-    }
-    function collectASequenceOfCodePointsFast(char, input, position) {
-      const idx = input.indexOf(char, position.position);
-      const start = position.position;
-      if (idx === -1) {
-        position.position = input.length;
-        return input.slice(start);
-      }
-      position.position = idx;
-      return input.slice(start, position.position);
-    }
-    var ASCII_WHITESPACE_REPLACE_REGEX = /[\u0009\u000A\u000C\u000D\u0020]/g;
-    function forgivingBase64(data) {
-      data = data.replace(ASCII_WHITESPACE_REPLACE_REGEX, "");
-      let dataLength = data.length;
-      if (dataLength % 4 === 0) {
-        if (data.charCodeAt(dataLength - 1) === 61) {
-          --dataLength;
-          if (data.charCodeAt(dataLength - 1) === 61) {
-            --dataLength;
-          }
-        }
-      }
-      if (dataLength % 4 === 1) {
-        return "failure";
-      }
-      if (/[^+/0-9A-Za-z]/.test(data.length === dataLength ? data : data.substring(0, dataLength))) {
-        return "failure";
-      }
-      const buffer = Buffer.from(data, "base64");
-      return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    }
-    function isASCIIWhitespace(char) {
-      return char === 9 || // \t
-      char === 10 || // \n
-      char === 12 || // \f
-      char === 13 || // \r
-      char === 32;
-    }
-    function isomorphicDecode(input) {
-      const length = input.length;
-      if ((2 << 15) - 1 > length) {
-        return String.fromCharCode.apply(null, input);
-      }
-      let result = "";
-      let i = 0;
-      let addition = (2 << 15) - 1;
-      while (i < length) {
-        if (i + addition > length) {
-          addition = length - i;
-        }
-        result += String.fromCharCode.apply(null, input.subarray(i, i += addition));
-      }
-      return result;
-    }
-    var invalidIsomorphicEncodeValueRegex = /[^\x00-\xFF]/;
-    function isomorphicEncode(input) {
-      assert(!invalidIsomorphicEncodeValueRegex.test(input));
-      return input;
-    }
-    function parseJSONFromBytes(bytes) {
-      return JSON.parse(utf8DecodeBytes(bytes));
-    }
-    function removeASCIIWhitespace(str, leading = true, trailing = true) {
-      return removeChars(str, leading, trailing, isASCIIWhitespace);
-    }
-    function removeChars(str, leading, trailing, predicate) {
-      let lead = 0;
-      let trail = str.length - 1;
-      if (leading) {
-        while (lead < str.length && predicate(str.charCodeAt(lead))) lead++;
-      }
-      if (trailing) {
-        while (trail > 0 && predicate(str.charCodeAt(trail))) trail--;
-      }
-      return lead === 0 && trail === str.length - 1 ? str : str.slice(lead, trail + 1);
-    }
-    function serializeJavascriptValueToJSONString(value) {
-      const result = JSON.stringify(value);
-      if (result === void 0) {
-        throw new TypeError("Value is not JSON serializable");
-      }
-      assert(typeof result === "string");
-      return result;
-    }
-    module2.exports = {
-      collectASequenceOfCodePoints,
-      collectASequenceOfCodePointsFast,
-      forgivingBase64,
-      isASCIIWhitespace,
-      isomorphicDecode,
-      isomorphicEncode,
-      parseJSONFromBytes,
-      removeASCIIWhitespace,
-      removeChars,
-      serializeJavascriptValueToJSONString
-    };
-  }
-});
-
-// node_modules/undici/lib/web/fetch/data-url.js
-var require_data_url2 = __commonJS({
-  "node_modules/undici/lib/web/fetch/data-url.js"(exports2, module2) {
-    "use strict";
-    var assert = require("node:assert");
-    var { forgivingBase64, collectASequenceOfCodePoints, collectASequenceOfCodePointsFast, isomorphicDecode, removeASCIIWhitespace, removeChars } = require_infra();
-    var encoder = new TextEncoder();
-    var HTTP_TOKEN_CODEPOINTS = /^[-!#$%&'*+.^_|~A-Za-z0-9]+$/u;
-    var HTTP_WHITESPACE_REGEX = /[\u000A\u000D\u0009\u0020]/u;
-    var HTTP_QUOTED_STRING_TOKENS = /^[\u0009\u0020-\u007E\u0080-\u00FF]+$/u;
-    function dataURLProcessor(dataURL) {
-      assert(dataURL.protocol === "data:");
-      let input = URLSerializer(dataURL, true);
-      input = input.slice(5);
-      const position = { position: 0 };
-      let mimeType = collectASequenceOfCodePointsFast(
-        ",",
-        input,
-        position
-      );
-      const mimeTypeLength = mimeType.length;
-      mimeType = removeASCIIWhitespace(mimeType, true, true);
-      if (position.position >= input.length) {
-        return "failure";
-      }
-      position.position++;
-      const encodedBody = input.slice(mimeTypeLength + 1);
-      let body = stringPercentDecode(encodedBody);
-      if (/;(?:\u0020*)base64$/ui.test(mimeType)) {
-        const stringBody = isomorphicDecode(body);
-        body = forgivingBase64(stringBody);
-        if (body === "failure") {
-          return "failure";
-        }
-        mimeType = mimeType.slice(0, -6);
-        mimeType = mimeType.replace(/(\u0020+)$/u, "");
-        mimeType = mimeType.slice(0, -1);
-      }
-      if (mimeType.startsWith(";")) {
-        mimeType = "text/plain" + mimeType;
-      }
-      let mimeTypeRecord = parseMIMEType(mimeType);
-      if (mimeTypeRecord === "failure") {
-        mimeTypeRecord = parseMIMEType("text/plain;charset=US-ASCII");
-      }
-      return { mimeType: mimeTypeRecord, body };
-    }
-    function URLSerializer(url2, excludeFragment = false) {
-      if (!excludeFragment) {
-        return url2.href;
-      }
-      const href = url2.href;
-      const hashLength = url2.hash.length;
-      const serialized = hashLength === 0 ? href : href.substring(0, href.length - hashLength);
-      if (!hashLength && href.endsWith("#")) {
-        return serialized.slice(0, -1);
-      }
-      return serialized;
-    }
-    function stringPercentDecode(input) {
-      const bytes = encoder.encode(input);
-      return percentDecode(bytes);
-    }
-    function isHexCharByte(byte) {
-      return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
-    }
-    function hexByteToNumber(byte) {
-      return (
-        // 0-9
-        byte >= 48 && byte <= 57 ? byte - 48 : (byte & 223) - 55
-      );
-    }
-    function percentDecode(input) {
-      const length = input.length;
-      const output = new Uint8Array(length);
-      let j3 = 0;
-      let i = 0;
-      while (i < length) {
-        const byte = input[i];
-        if (byte !== 37) {
-          output[j3++] = byte;
-        } else if (byte === 37 && !(isHexCharByte(input[i + 1]) && isHexCharByte(input[i + 2]))) {
-          output[j3++] = 37;
-        } else {
-          output[j3++] = hexByteToNumber(input[i + 1]) << 4 | hexByteToNumber(input[i + 2]);
-          i += 2;
-        }
-        ++i;
-      }
-      return length === j3 ? output : output.subarray(0, j3);
-    }
-    function parseMIMEType(input) {
-      input = removeHTTPWhitespace(input, true, true);
-      const position = { position: 0 };
-      const type = collectASequenceOfCodePointsFast(
-        "/",
-        input,
-        position
-      );
-      if (type.length === 0 || !HTTP_TOKEN_CODEPOINTS.test(type)) {
-        return "failure";
-      }
-      if (position.position >= input.length) {
-        return "failure";
-      }
-      position.position++;
-      let subtype = collectASequenceOfCodePointsFast(
-        ";",
-        input,
-        position
-      );
-      subtype = removeHTTPWhitespace(subtype, false, true);
-      if (subtype.length === 0 || !HTTP_TOKEN_CODEPOINTS.test(subtype)) {
-        return "failure";
-      }
-      const typeLowercase = type.toLowerCase();
-      const subtypeLowercase = subtype.toLowerCase();
-      const mimeType = {
-        type: typeLowercase,
-        subtype: subtypeLowercase,
-        /** @type {Map<string, string>} */
-        parameters: /* @__PURE__ */ new Map(),
-        // https://mimesniff.spec.whatwg.org/#mime-type-essence
-        essence: `${typeLowercase}/${subtypeLowercase}`
-      };
-      while (position.position < input.length) {
-        position.position++;
-        collectASequenceOfCodePoints(
-          // https://fetch.spec.whatwg.org/#http-whitespace
-          (char) => HTTP_WHITESPACE_REGEX.test(char),
-          input,
-          position
-        );
-        let parameterName = collectASequenceOfCodePoints(
-          (char) => char !== ";" && char !== "=",
-          input,
-          position
-        );
-        parameterName = parameterName.toLowerCase();
-        if (position.position < input.length) {
-          if (input[position.position] === ";") {
-            continue;
-          }
-          position.position++;
-        }
-        if (position.position >= input.length) {
-          break;
-        }
-        let parameterValue = null;
-        if (input[position.position] === '"') {
-          parameterValue = collectAnHTTPQuotedString(input, position, true);
-          collectASequenceOfCodePointsFast(
-            ";",
-            input,
-            position
-          );
-        } else {
-          parameterValue = collectASequenceOfCodePointsFast(
-            ";",
-            input,
-            position
-          );
-          parameterValue = removeHTTPWhitespace(parameterValue, false, true);
-          if (parameterValue.length === 0) {
-            continue;
-          }
-        }
-        if (parameterName.length !== 0 && HTTP_TOKEN_CODEPOINTS.test(parameterName) && (parameterValue.length === 0 || HTTP_QUOTED_STRING_TOKENS.test(parameterValue)) && !mimeType.parameters.has(parameterName)) {
-          mimeType.parameters.set(parameterName, parameterValue);
-        }
-      }
-      return mimeType;
-    }
-    function collectAnHTTPQuotedString(input, position, extractValue = false) {
-      const positionStart = position.position;
-      let value = "";
-      assert(input[position.position] === '"');
-      position.position++;
-      while (true) {
-        value += collectASequenceOfCodePoints(
-          (char) => char !== '"' && char !== "\\",
-          input,
-          position
-        );
-        if (position.position >= input.length) {
-          break;
-        }
-        const quoteOrBackslash = input[position.position];
-        position.position++;
-        if (quoteOrBackslash === "\\") {
-          if (position.position >= input.length) {
-            value += "\\";
-            break;
-          }
-          value += input[position.position];
-          position.position++;
-        } else {
-          assert(quoteOrBackslash === '"');
-          break;
-        }
-      }
-      if (extractValue) {
-        return value;
-      }
-      return input.slice(positionStart, position.position);
-    }
-    function serializeAMimeType(mimeType) {
-      assert(mimeType !== "failure");
-      const { parameters, essence } = mimeType;
-      let serialization = essence;
-      for (let [name, value] of parameters.entries()) {
-        serialization += ";";
-        serialization += name;
-        serialization += "=";
-        if (!HTTP_TOKEN_CODEPOINTS.test(value)) {
-          value = value.replace(/[\\"]/ug, "\\$&");
-          value = '"' + value;
-          value += '"';
-        }
-        serialization += value;
-      }
-      return serialization;
-    }
-    function isHTTPWhiteSpace(char) {
-      return char === 13 || char === 10 || char === 9 || char === 32;
-    }
-    function removeHTTPWhitespace(str, leading = true, trailing = true) {
-      return removeChars(str, leading, trailing, isHTTPWhiteSpace);
-    }
-    function minimizeSupportedMimeType(mimeType) {
-      switch (mimeType.essence) {
-        case "application/ecmascript":
-        case "application/javascript":
-        case "application/x-ecmascript":
-        case "application/x-javascript":
-        case "text/ecmascript":
-        case "text/javascript":
-        case "text/javascript1.0":
-        case "text/javascript1.1":
-        case "text/javascript1.2":
-        case "text/javascript1.3":
-        case "text/javascript1.4":
-        case "text/javascript1.5":
-        case "text/jscript":
-        case "text/livescript":
-        case "text/x-ecmascript":
-        case "text/x-javascript":
-          return "text/javascript";
-        case "application/json":
-        case "text/json":
-          return "application/json";
-        case "image/svg+xml":
-          return "image/svg+xml";
-        case "text/xml":
-        case "application/xml":
-          return "application/xml";
-      }
-      if (mimeType.subtype.endsWith("+json")) {
-        return "application/json";
-      }
-      if (mimeType.subtype.endsWith("+xml")) {
-        return "application/xml";
-      }
-      return "";
-    }
-    module2.exports = {
-      dataURLProcessor,
-      URLSerializer,
-      stringPercentDecode,
-      parseMIMEType,
-      collectAnHTTPQuotedString,
-      serializeAMimeType,
-      removeHTTPWhitespace,
-      minimizeSupportedMimeType,
-      HTTP_TOKEN_CODEPOINTS
-    };
-  }
-});
-
-// node_modules/undici/lib/web/webidl/index.js
-var require_webidl2 = __commonJS({
-  "node_modules/undici/lib/web/webidl/index.js"(exports2, module2) {
-    "use strict";
-    var assert = require("node:assert");
-    var { types: types3, inspect } = require("node:util");
-    var { markAsUncloneable } = require("node:worker_threads");
-    var UNDEFINED = 1;
-    var BOOLEAN = 2;
-    var STRING = 3;
-    var SYMBOL = 4;
-    var NUMBER = 5;
-    var BIGINT = 6;
-    var NULL = 7;
-    var OBJECT = 8;
-    var FunctionPrototypeSymbolHasInstance = Function.call.bind(Function.prototype[Symbol.hasInstance]);
-    var webidl = {
-      converters: {},
-      util: {},
-      errors: {},
-      is: {}
-    };
-    webidl.errors.exception = function(message) {
-      return new TypeError(`${message.header}: ${message.message}`);
-    };
-    webidl.errors.conversionFailed = function(opts) {
-      const plural = opts.types.length === 1 ? "" : " one of";
-      const message = `${opts.argument} could not be converted to${plural}: ${opts.types.join(", ")}.`;
-      return webidl.errors.exception({
-        header: opts.prefix,
-        message
-      });
-    };
-    webidl.errors.invalidArgument = function(context) {
-      return webidl.errors.exception({
-        header: context.prefix,
-        message: `"${context.value}" is an invalid ${context.type}.`
-      });
-    };
-    webidl.brandCheck = function(V3, I3) {
-      if (!FunctionPrototypeSymbolHasInstance(I3, V3)) {
-        const err = new TypeError("Illegal invocation");
-        err.code = "ERR_INVALID_THIS";
-        throw err;
-      }
-    };
-    webidl.brandCheckMultiple = function(List) {
-      const prototypes = List.map((c) => webidl.util.MakeTypeAssertion(c));
-      return (V3) => {
-        if (prototypes.every((typeCheck) => !typeCheck(V3))) {
-          const err = new TypeError("Illegal invocation");
-          err.code = "ERR_INVALID_THIS";
-          throw err;
-        }
-      };
-    };
-    webidl.argumentLengthCheck = function({ length }, min, ctx) {
-      if (length < min) {
-        throw webidl.errors.exception({
-          message: `${min} argument${min !== 1 ? "s" : ""} required, but${length ? " only" : ""} ${length} found.`,
-          header: ctx
-        });
-      }
-    };
-    webidl.illegalConstructor = function() {
-      throw webidl.errors.exception({
-        header: "TypeError",
-        message: "Illegal constructor"
-      });
-    };
-    webidl.util.MakeTypeAssertion = function(I3) {
-      return (O3) => FunctionPrototypeSymbolHasInstance(I3, O3);
-    };
-    webidl.util.Type = function(V3) {
-      switch (typeof V3) {
-        case "undefined":
-          return UNDEFINED;
-        case "boolean":
-          return BOOLEAN;
-        case "string":
-          return STRING;
-        case "symbol":
-          return SYMBOL;
-        case "number":
-          return NUMBER;
-        case "bigint":
-          return BIGINT;
-        case "function":
-        case "object": {
-          if (V3 === null) {
-            return NULL;
-          }
-          return OBJECT;
-        }
-      }
-    };
-    webidl.util.Types = {
-      UNDEFINED,
-      BOOLEAN,
-      STRING,
-      SYMBOL,
-      NUMBER,
-      BIGINT,
-      NULL,
-      OBJECT
-    };
-    webidl.util.TypeValueToString = function(o) {
-      switch (webidl.util.Type(o)) {
-        case UNDEFINED:
-          return "Undefined";
-        case BOOLEAN:
-          return "Boolean";
-        case STRING:
-          return "String";
-        case SYMBOL:
-          return "Symbol";
-        case NUMBER:
-          return "Number";
-        case BIGINT:
-          return "BigInt";
-        case NULL:
-          return "Null";
-        case OBJECT:
-          return "Object";
-      }
-    };
-    webidl.util.markAsUncloneable = markAsUncloneable;
-    webidl.util.ConvertToInt = function(V3, bitLength, signedness, flags) {
-      let upperBound;
-      let lowerBound;
-      if (bitLength === 64) {
-        upperBound = Math.pow(2, 53) - 1;
-        if (signedness === "unsigned") {
-          lowerBound = 0;
-        } else {
-          lowerBound = Math.pow(-2, 53) + 1;
-        }
-      } else if (signedness === "unsigned") {
-        lowerBound = 0;
-        upperBound = Math.pow(2, bitLength) - 1;
-      } else {
-        lowerBound = -Math.pow(2, bitLength - 1);
-        upperBound = Math.pow(2, bitLength - 1) - 1;
-      }
-      let x3 = Number(V3);
-      if (x3 === 0) {
-        x3 = 0;
-      }
-      if (webidl.util.HasFlag(flags, webidl.attributes.EnforceRange)) {
-        if (Number.isNaN(x3) || x3 === Number.POSITIVE_INFINITY || x3 === Number.NEGATIVE_INFINITY) {
-          throw webidl.errors.exception({
-            header: "Integer conversion",
-            message: `Could not convert ${webidl.util.Stringify(V3)} to an integer.`
-          });
-        }
-        x3 = webidl.util.IntegerPart(x3);
-        if (x3 < lowerBound || x3 > upperBound) {
-          throw webidl.errors.exception({
-            header: "Integer conversion",
-            message: `Value must be between ${lowerBound}-${upperBound}, got ${x3}.`
-          });
-        }
-        return x3;
-      }
-      if (!Number.isNaN(x3) && webidl.util.HasFlag(flags, webidl.attributes.Clamp)) {
-        x3 = Math.min(Math.max(x3, lowerBound), upperBound);
-        if (Math.floor(x3) % 2 === 0) {
-          x3 = Math.floor(x3);
-        } else {
-          x3 = Math.ceil(x3);
-        }
-        return x3;
-      }
-      if (Number.isNaN(x3) || x3 === 0 && Object.is(0, x3) || x3 === Number.POSITIVE_INFINITY || x3 === Number.NEGATIVE_INFINITY) {
-        return 0;
-      }
-      x3 = webidl.util.IntegerPart(x3);
-      x3 = x3 % Math.pow(2, bitLength);
-      if (signedness === "signed" && x3 >= Math.pow(2, bitLength - 1)) {
-        return x3 - Math.pow(2, bitLength);
-      }
-      return x3;
-    };
-    webidl.util.IntegerPart = function(n7) {
-      const r = Math.floor(Math.abs(n7));
-      if (n7 < 0) {
-        return -1 * r;
-      }
-      return r;
-    };
-    webidl.util.Stringify = function(V3) {
-      const type = webidl.util.Type(V3);
-      switch (type) {
-        case SYMBOL:
-          return `Symbol(${V3.description})`;
-        case OBJECT:
-          return inspect(V3);
-        case STRING:
-          return `"${V3}"`;
-        case BIGINT:
-          return `${V3}n`;
-        default:
-          return `${V3}`;
-      }
-    };
-    webidl.util.IsResizableArrayBuffer = function(V3) {
-      if (types3.isArrayBuffer(V3)) {
-        return V3.resizable;
-      }
-      if (types3.isSharedArrayBuffer(V3)) {
-        return V3.growable;
-      }
-      throw webidl.errors.exception({
-        header: "IsResizableArrayBuffer",
-        message: `"${webidl.util.Stringify(V3)}" is not an array buffer.`
-      });
-    };
-    webidl.util.HasFlag = function(flags, attributes) {
-      return typeof flags === "number" && (flags & attributes) === attributes;
-    };
-    webidl.sequenceConverter = function(converter) {
-      return (V3, prefix, argument, Iterable) => {
-        if (webidl.util.Type(V3) !== OBJECT) {
-          throw webidl.errors.exception({
-            header: prefix,
-            message: `${argument} (${webidl.util.Stringify(V3)}) is not iterable.`
-          });
-        }
-        const method = typeof Iterable === "function" ? Iterable() : V3?.[Symbol.iterator]?.();
-        const seq = [];
-        let index = 0;
-        if (method === void 0 || typeof method.next !== "function") {
-          throw webidl.errors.exception({
-            header: prefix,
-            message: `${argument} is not iterable.`
-          });
-        }
-        while (true) {
-          const { done, value } = method.next();
-          if (done) {
-            break;
-          }
-          seq.push(converter(value, prefix, `${argument}[${index++}]`));
-        }
-        return seq;
-      };
-    };
-    webidl.recordConverter = function(keyConverter, valueConverter) {
-      return (O3, prefix, argument) => {
-        if (webidl.util.Type(O3) !== OBJECT) {
-          throw webidl.errors.exception({
-            header: prefix,
-            message: `${argument} ("${webidl.util.TypeValueToString(O3)}") is not an Object.`
-          });
-        }
-        const result = {};
-        if (!types3.isProxy(O3)) {
-          const keys2 = [...Object.getOwnPropertyNames(O3), ...Object.getOwnPropertySymbols(O3)];
-          for (const key of keys2) {
-            const keyName = webidl.util.Stringify(key);
-            const typedKey = keyConverter(key, prefix, `Key ${keyName} in ${argument}`);
-            const typedValue = valueConverter(O3[key], prefix, `${argument}[${keyName}]`);
-            result[typedKey] = typedValue;
-          }
-          return result;
-        }
-        const keys = Reflect.ownKeys(O3);
-        for (const key of keys) {
-          const desc = Reflect.getOwnPropertyDescriptor(O3, key);
-          if (desc?.enumerable) {
-            const typedKey = keyConverter(key, prefix, argument);
-            const typedValue = valueConverter(O3[key], prefix, argument);
-            result[typedKey] = typedValue;
-          }
-        }
-        return result;
-      };
-    };
-    webidl.interfaceConverter = function(TypeCheck, name) {
-      return (V3, prefix, argument) => {
-        if (!TypeCheck(V3)) {
-          throw webidl.errors.exception({
-            header: prefix,
-            message: `Expected ${argument} ("${webidl.util.Stringify(V3)}") to be an instance of ${name}.`
-          });
-        }
-        return V3;
-      };
-    };
-    webidl.dictionaryConverter = function(converters) {
-      converters.sort((a, b2) => (a.key > b2.key) - (a.key < b2.key));
-      return (dictionary, prefix, argument) => {
-        const dict = {};
-        if (dictionary != null && webidl.util.Type(dictionary) !== OBJECT) {
-          throw webidl.errors.exception({
-            header: prefix,
-            message: `Expected ${dictionary} to be one of: Null, Undefined, Object.`
-          });
-        }
-        for (const options of converters) {
-          const { key, defaultValue, required, converter } = options;
-          if (required === true) {
-            if (dictionary == null || !Object.hasOwn(dictionary, key)) {
-              throw webidl.errors.exception({
-                header: prefix,
-                message: `Missing required key "${key}".`
-              });
-            }
-          }
-          let value = dictionary?.[key];
-          const hasDefault = defaultValue !== void 0;
-          if (hasDefault && value === void 0) {
-            value = defaultValue();
-          }
-          if (required || hasDefault || value !== void 0) {
-            value = converter(value, prefix, `${argument}.${key}`);
-            if (options.allowedValues && !options.allowedValues.includes(value)) {
-              throw webidl.errors.exception({
-                header: prefix,
-                message: `${value} is not an accepted type. Expected one of ${options.allowedValues.join(", ")}.`
-              });
-            }
-            dict[key] = value;
-          }
-        }
-        return dict;
-      };
-    };
-    webidl.nullableConverter = function(converter) {
-      return (V3, prefix, argument) => {
-        if (V3 === null) {
-          return V3;
-        }
-        return converter(V3, prefix, argument);
-      };
-    };
-    webidl.is.USVString = function(value) {
-      return typeof value === "string" && value.isWellFormed();
-    };
-    webidl.is.ReadableStream = webidl.util.MakeTypeAssertion(ReadableStream);
-    webidl.is.Blob = webidl.util.MakeTypeAssertion(Blob);
-    webidl.is.URLSearchParams = webidl.util.MakeTypeAssertion(URLSearchParams);
-    webidl.is.File = webidl.util.MakeTypeAssertion(File);
-    webidl.is.URL = webidl.util.MakeTypeAssertion(URL);
-    webidl.is.AbortSignal = webidl.util.MakeTypeAssertion(AbortSignal);
-    webidl.is.MessagePort = webidl.util.MakeTypeAssertion(MessagePort);
-    webidl.is.BufferSource = function(V3) {
-      return types3.isArrayBuffer(V3) || ArrayBuffer.isView(V3) && types3.isArrayBuffer(V3.buffer);
-    };
-    webidl.util.getCopyOfBytesHeldByBufferSource = function(bufferSource) {
-      const jsBufferSource = bufferSource;
-      let jsArrayBuffer = jsBufferSource;
-      let offset = 0;
-      let length = 0;
-      if (types3.isTypedArray(jsBufferSource) || types3.isDataView(jsBufferSource)) {
-        jsArrayBuffer = jsBufferSource.buffer;
-        offset = jsBufferSource.byteOffset;
-        length = jsBufferSource.byteLength;
-      } else {
-        assert(types3.isAnyArrayBuffer(jsBufferSource));
-        length = jsBufferSource.byteLength;
-      }
-      if (jsArrayBuffer.detached) {
-        return new Uint8Array(0);
-      }
-      const bytes = new Uint8Array(length);
-      const view = new Uint8Array(jsArrayBuffer, offset, length);
-      bytes.set(view);
-      return bytes;
-    };
-    webidl.converters.DOMString = function(V3, prefix, argument, flags) {
-      if (V3 === null && webidl.util.HasFlag(flags, webidl.attributes.LegacyNullToEmptyString)) {
-        return "";
-      }
-      if (typeof V3 === "symbol") {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} is a symbol, which cannot be converted to a DOMString.`
-        });
-      }
-      return String(V3);
-    };
-    webidl.converters.ByteString = function(V3, prefix, argument) {
-      if (typeof V3 === "symbol") {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} is a symbol, which cannot be converted to a ByteString.`
-        });
-      }
-      const x3 = String(V3);
-      for (let index = 0; index < x3.length; index++) {
-        if (x3.charCodeAt(index) > 255) {
-          throw new TypeError(
-            `Cannot convert argument to a ByteString because the character at index ${index} has a value of ${x3.charCodeAt(index)} which is greater than 255.`
-          );
-        }
-      }
-      return x3;
-    };
-    webidl.converters.USVString = function(value) {
-      if (typeof value === "string") {
-        return value.toWellFormed();
-      }
-      return `${value}`.toWellFormed();
-    };
-    webidl.converters.boolean = function(V3) {
-      const x3 = Boolean(V3);
-      return x3;
-    };
-    webidl.converters.any = function(V3) {
-      return V3;
-    };
-    webidl.converters["long long"] = function(V3, prefix, argument) {
-      const x3 = webidl.util.ConvertToInt(V3, 64, "signed", 0, prefix, argument);
-      return x3;
-    };
-    webidl.converters["unsigned long long"] = function(V3, prefix, argument) {
-      const x3 = webidl.util.ConvertToInt(V3, 64, "unsigned", 0, prefix, argument);
-      return x3;
-    };
-    webidl.converters["unsigned long"] = function(V3, prefix, argument) {
-      const x3 = webidl.util.ConvertToInt(V3, 32, "unsigned", 0, prefix, argument);
-      return x3;
-    };
-    webidl.converters["unsigned short"] = function(V3, prefix, argument, flags) {
-      const x3 = webidl.util.ConvertToInt(V3, 16, "unsigned", flags, prefix, argument);
-      return x3;
-    };
-    webidl.converters.ArrayBuffer = function(V3, prefix, argument, flags) {
-      if (webidl.util.Type(V3) !== OBJECT || !types3.isArrayBuffer(V3)) {
-        throw webidl.errors.conversionFailed({
-          prefix,
-          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-          types: ["ArrayBuffer"]
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a resizable ArrayBuffer.`
-        });
-      }
-      return V3;
-    };
-    webidl.converters.SharedArrayBuffer = function(V3, prefix, argument, flags) {
-      if (webidl.util.Type(V3) !== OBJECT || !types3.isSharedArrayBuffer(V3)) {
-        throw webidl.errors.conversionFailed({
-          prefix,
-          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-          types: ["SharedArrayBuffer"]
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a resizable SharedArrayBuffer.`
-        });
-      }
-      return V3;
-    };
-    webidl.converters.TypedArray = function(V3, T2, prefix, argument, flags) {
-      if (webidl.util.Type(V3) !== OBJECT || !types3.isTypedArray(V3) || V3.constructor.name !== T2.name) {
-        throw webidl.errors.conversionFailed({
-          prefix,
-          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-          types: [T2.name]
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a shared array buffer.`
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a resizable array buffer.`
-        });
-      }
-      return V3;
-    };
-    webidl.converters.DataView = function(V3, prefix, argument, flags) {
-      if (webidl.util.Type(V3) !== OBJECT || !types3.isDataView(V3)) {
-        throw webidl.errors.conversionFailed({
-          prefix,
-          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-          types: ["DataView"]
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a shared array buffer.`
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a resizable array buffer.`
-        });
-      }
-      return V3;
-    };
-    webidl.converters.ArrayBufferView = function(V3, prefix, argument, flags) {
-      if (webidl.util.Type(V3) !== OBJECT || !types3.isArrayBufferView(V3)) {
-        throw webidl.errors.conversionFailed({
-          prefix,
-          argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-          types: ["ArrayBufferView"]
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowShared) && types3.isSharedArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a shared array buffer.`
-        });
-      }
-      if (!webidl.util.HasFlag(flags, webidl.attributes.AllowResizable) && webidl.util.IsResizableArrayBuffer(V3.buffer)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a view on a resizable array buffer.`
-        });
-      }
-      return V3;
-    };
-    webidl.converters.BufferSource = function(V3, prefix, argument, flags) {
-      if (types3.isArrayBuffer(V3)) {
-        return webidl.converters.ArrayBuffer(V3, prefix, argument, flags);
-      }
-      if (types3.isArrayBufferView(V3)) {
-        flags &= ~webidl.attributes.AllowShared;
-        return webidl.converters.ArrayBufferView(V3, prefix, argument, flags);
-      }
-      if (types3.isSharedArrayBuffer(V3)) {
-        throw webidl.errors.exception({
-          header: prefix,
-          message: `${argument} cannot be a SharedArrayBuffer.`
-        });
-      }
-      throw webidl.errors.conversionFailed({
-        prefix,
-        argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-        types: ["ArrayBuffer", "ArrayBufferView"]
-      });
-    };
-    webidl.converters.AllowSharedBufferSource = function(V3, prefix, argument, flags) {
-      if (types3.isArrayBuffer(V3)) {
-        return webidl.converters.ArrayBuffer(V3, prefix, argument, flags);
-      }
-      if (types3.isSharedArrayBuffer(V3)) {
-        return webidl.converters.SharedArrayBuffer(V3, prefix, argument, flags);
-      }
-      if (types3.isArrayBufferView(V3)) {
-        flags |= webidl.attributes.AllowShared;
-        return webidl.converters.ArrayBufferView(V3, prefix, argument, flags);
-      }
-      throw webidl.errors.conversionFailed({
-        prefix,
-        argument: `${argument} ("${webidl.util.Stringify(V3)}")`,
-        types: ["ArrayBuffer", "SharedArrayBuffer", "ArrayBufferView"]
-      });
-    };
-    webidl.converters["sequence<ByteString>"] = webidl.sequenceConverter(
-      webidl.converters.ByteString
-    );
-    webidl.converters["sequence<sequence<ByteString>>"] = webidl.sequenceConverter(
-      webidl.converters["sequence<ByteString>"]
-    );
-    webidl.converters["record<ByteString, ByteString>"] = webidl.recordConverter(
-      webidl.converters.ByteString,
-      webidl.converters.ByteString
-    );
-    webidl.converters.Blob = webidl.interfaceConverter(webidl.is.Blob, "Blob");
-    webidl.converters.AbortSignal = webidl.interfaceConverter(
-      webidl.is.AbortSignal,
-      "AbortSignal"
-    );
-    webidl.converters.EventHandlerNonNull = function(V3) {
-      if (webidl.util.Type(V3) !== OBJECT) {
-        return null;
-      }
-      if (typeof V3 === "function") {
-        return V3;
-      }
-      return () => {
-      };
-    };
-    webidl.attributes = {
-      Clamp: 1 << 0,
-      EnforceRange: 1 << 1,
-      AllowShared: 1 << 2,
-      AllowResizable: 1 << 3,
-      LegacyNullToEmptyString: 1 << 4
-    };
-    module2.exports = {
-      webidl
-    };
-  }
-});
-
-// node_modules/undici/lib/web/fetch/util.js
-var require_util10 = __commonJS({
-  "node_modules/undici/lib/web/fetch/util.js"(exports2, module2) {
-    "use strict";
-    var { Transform } = require("node:stream");
-    var zlib2 = require("node:zlib");
-    var { redirectStatusSet, referrerPolicyTokens, badPortsSet } = require_constants8();
-    var { getGlobalOrigin } = require_global3();
-    var { collectAnHTTPQuotedString, parseMIMEType } = require_data_url2();
-    var { performance: performance2 } = require("node:perf_hooks");
-    var { ReadableStreamFrom, isValidHTTPToken, normalizedMethodRecordsBase } = require_util9();
-    var assert = require("node:assert");
-    var { isUint8Array } = require("node:util/types");
-    var { webidl } = require_webidl2();
-    var { isomorphicEncode, collectASequenceOfCodePoints, removeChars } = require_infra();
-    function responseURL(response) {
-      const urlList = response.urlList;
-      const length = urlList.length;
-      return length === 0 ? null : urlList[length - 1].toString();
-    }
-    function responseLocationURL(response, requestFragment) {
-      if (!redirectStatusSet.has(response.status)) {
-        return null;
-      }
-      let location = response.headersList.get("location", true);
-      if (location !== null && isValidHeaderValue(location)) {
-        if (!isValidEncodedURL(location)) {
-          location = normalizeBinaryStringToUtf8(location);
-        }
-        location = new URL(location, responseURL(response));
-      }
-      if (location && !location.hash) {
-        location.hash = requestFragment;
-      }
-      return location;
-    }
-    function isValidEncodedURL(url2) {
-      for (let i = 0; i < url2.length; ++i) {
-        const code = url2.charCodeAt(i);
-        if (code > 126 || // Non-US-ASCII + DEL
-        code < 32) {
-          return false;
-        }
-      }
-      return true;
-    }
-    function normalizeBinaryStringToUtf8(value) {
-      return Buffer.from(value, "binary").toString("utf8");
-    }
-    function requestCurrentURL(request) {
-      return request.urlList[request.urlList.length - 1];
-    }
-    function requestBadPort(request) {
-      const url2 = requestCurrentURL(request);
-      if (urlIsHttpHttpsScheme(url2) && badPortsSet.has(url2.port)) {
-        return "blocked";
-      }
-      return "allowed";
-    }
-    function isErrorLike(object) {
-      return object instanceof Error || (object?.constructor?.name === "Error" || object?.constructor?.name === "DOMException");
-    }
-    function isValidReasonPhrase(statusText) {
-      for (let i = 0; i < statusText.length; ++i) {
-        const c = statusText.charCodeAt(i);
-        if (!(c === 9 || // HTAB
-        c >= 32 && c <= 126 || // SP / VCHAR
-        c >= 128 && c <= 255)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    var isValidHeaderName2 = isValidHTTPToken;
-    function isValidHeaderValue(potentialValue) {
-      return (potentialValue[0] === "	" || potentialValue[0] === " " || potentialValue[potentialValue.length - 1] === "	" || potentialValue[potentialValue.length - 1] === " " || potentialValue.includes("\n") || potentialValue.includes("\r") || potentialValue.includes("\0")) === false;
-    }
-    function parseReferrerPolicy(actualResponse) {
-      const policyHeader = (actualResponse.headersList.get("referrer-policy", true) ?? "").split(",");
-      let policy = "";
-      if (policyHeader.length) {
-        for (let i = policyHeader.length; i !== 0; i--) {
-          const token = policyHeader[i - 1].trim();
-          if (referrerPolicyTokens.has(token)) {
-            policy = token;
-            break;
-          }
-        }
-      }
-      return policy;
-    }
-    function setRequestReferrerPolicyOnRedirect(request, actualResponse) {
-      const policy = parseReferrerPolicy(actualResponse);
-      if (policy !== "") {
-        request.referrerPolicy = policy;
-      }
-    }
-    function crossOriginResourcePolicyCheck() {
-      return "allowed";
-    }
-    function corsCheck() {
-      return "success";
-    }
-    function TAOCheck() {
-      return "success";
-    }
-    function appendFetchMetadata(httpRequest) {
-      let header = null;
-      header = httpRequest.mode;
-      httpRequest.headersList.set("sec-fetch-mode", header, true);
-    }
-    function appendRequestOriginHeader(request) {
-      let serializedOrigin = request.origin;
-      if (serializedOrigin === "client" || serializedOrigin === void 0) {
-        return;
-      }
-      if (request.responseTainting === "cors" || request.mode === "websocket") {
-        request.headersList.append("origin", serializedOrigin, true);
-      } else if (request.method !== "GET" && request.method !== "HEAD") {
-        switch (request.referrerPolicy) {
-          case "no-referrer":
-            serializedOrigin = null;
-            break;
-          case "no-referrer-when-downgrade":
-          case "strict-origin":
-          case "strict-origin-when-cross-origin":
-            if (request.origin && urlHasHttpsScheme(request.origin) && !urlHasHttpsScheme(requestCurrentURL(request))) {
-              serializedOrigin = null;
-            }
-            break;
-          case "same-origin":
-            if (!sameOrigin(request, requestCurrentURL(request))) {
-              serializedOrigin = null;
-            }
-            break;
-          default:
-        }
-        request.headersList.append("origin", serializedOrigin, true);
-      }
-    }
-    function coarsenTime(timestamp, crossOriginIsolatedCapability) {
-      return timestamp;
-    }
-    function clampAndCoarsenConnectionTimingInfo(connectionTimingInfo, defaultStartTime, crossOriginIsolatedCapability) {
-      if (!connectionTimingInfo?.startTime || connectionTimingInfo.startTime < defaultStartTime) {
-        return {
-          domainLookupStartTime: defaultStartTime,
-          domainLookupEndTime: defaultStartTime,
-          connectionStartTime: defaultStartTime,
-          connectionEndTime: defaultStartTime,
-          secureConnectionStartTime: defaultStartTime,
-          ALPNNegotiatedProtocol: connectionTimingInfo?.ALPNNegotiatedProtocol
-        };
-      }
-      return {
-        domainLookupStartTime: coarsenTime(connectionTimingInfo.domainLookupStartTime, crossOriginIsolatedCapability),
-        domainLookupEndTime: coarsenTime(connectionTimingInfo.domainLookupEndTime, crossOriginIsolatedCapability),
-        connectionStartTime: coarsenTime(connectionTimingInfo.connectionStartTime, crossOriginIsolatedCapability),
-        connectionEndTime: coarsenTime(connectionTimingInfo.connectionEndTime, crossOriginIsolatedCapability),
-        secureConnectionStartTime: coarsenTime(connectionTimingInfo.secureConnectionStartTime, crossOriginIsolatedCapability),
-        ALPNNegotiatedProtocol: connectionTimingInfo.ALPNNegotiatedProtocol
-      };
-    }
-    function coarsenedSharedCurrentTime(crossOriginIsolatedCapability) {
-      return coarsenTime(performance2.now(), crossOriginIsolatedCapability);
-    }
-    function createOpaqueTimingInfo(timingInfo) {
-      return {
-        startTime: timingInfo.startTime ?? 0,
-        redirectStartTime: 0,
-        redirectEndTime: 0,
-        postRedirectStartTime: timingInfo.startTime ?? 0,
-        finalServiceWorkerStartTime: 0,
-        finalNetworkResponseStartTime: 0,
-        finalNetworkRequestStartTime: 0,
-        endTime: 0,
-        encodedBodySize: 0,
-        decodedBodySize: 0,
-        finalConnectionTimingInfo: null
-      };
-    }
-    function makePolicyContainer() {
-      return {
-        referrerPolicy: "strict-origin-when-cross-origin"
-      };
-    }
-    function clonePolicyContainer(policyContainer) {
-      return {
-        referrerPolicy: policyContainer.referrerPolicy
-      };
-    }
-    function determineRequestsReferrer(request) {
-      const policy = request.referrerPolicy;
-      assert(policy);
-      let referrerSource = null;
-      if (request.referrer === "client") {
-        const globalOrigin = getGlobalOrigin();
-        if (!globalOrigin || globalOrigin.origin === "null") {
-          return "no-referrer";
-        }
-        referrerSource = new URL(globalOrigin);
-      } else if (webidl.is.URL(request.referrer)) {
-        referrerSource = request.referrer;
-      }
-      let referrerURL = stripURLForReferrer(referrerSource);
-      const referrerOrigin = stripURLForReferrer(referrerSource, true);
-      if (referrerURL.toString().length > 4096) {
-        referrerURL = referrerOrigin;
-      }
-      switch (policy) {
-        case "no-referrer":
-          return "no-referrer";
-        case "origin":
-          if (referrerOrigin != null) {
-            return referrerOrigin;
-          }
-          return stripURLForReferrer(referrerSource, true);
-        case "unsafe-url":
-          return referrerURL;
-        case "strict-origin": {
-          const currentURL = requestCurrentURL(request);
-          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
-            return "no-referrer";
-          }
-          return referrerOrigin;
-        }
-        case "strict-origin-when-cross-origin": {
-          const currentURL = requestCurrentURL(request);
-          if (sameOrigin(referrerURL, currentURL)) {
-            return referrerURL;
-          }
-          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
-            return "no-referrer";
-          }
-          return referrerOrigin;
-        }
-        case "same-origin":
-          if (sameOrigin(request, referrerURL)) {
-            return referrerURL;
-          }
-          return "no-referrer";
-        case "origin-when-cross-origin":
-          if (sameOrigin(request, referrerURL)) {
-            return referrerURL;
-          }
-          return referrerOrigin;
-        case "no-referrer-when-downgrade": {
-          const currentURL = requestCurrentURL(request);
-          if (isURLPotentiallyTrustworthy(referrerURL) && !isURLPotentiallyTrustworthy(currentURL)) {
-            return "no-referrer";
-          }
-          return referrerURL;
-        }
-      }
-    }
-    function stripURLForReferrer(url2, originOnly = false) {
-      assert(webidl.is.URL(url2));
-      url2 = new URL(url2);
-      if (urlIsLocal(url2)) {
-        return "no-referrer";
-      }
-      url2.username = "";
-      url2.password = "";
-      url2.hash = "";
-      if (originOnly === true) {
-        url2.pathname = "";
-        url2.search = "";
-      }
-      return url2;
-    }
-    var isPotentialleTrustworthyIPv4 = RegExp.prototype.test.bind(/^127\.(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){2}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/);
-    var isPotentiallyTrustworthyIPv6 = RegExp.prototype.test.bind(/^(?:(?:0{1,4}:){7}|(?:0{1,4}:){1,6}:|::)0{0,3}1$/);
-    function isOriginIPPotentiallyTrustworthy(origin2) {
-      if (origin2.includes(":")) {
-        if (origin2[0] === "[" && origin2[origin2.length - 1] === "]") {
-          origin2 = origin2.slice(1, -1);
-        }
-        return isPotentiallyTrustworthyIPv6(origin2);
-      }
-      return isPotentialleTrustworthyIPv4(origin2);
-    }
-    function isOriginPotentiallyTrustworthy(origin2) {
-      if (origin2 == null || origin2 === "null") {
-        return false;
-      }
-      origin2 = new URL(origin2);
-      if (origin2.protocol === "https:" || origin2.protocol === "wss:") {
-        return true;
-      }
-      if (isOriginIPPotentiallyTrustworthy(origin2.hostname)) {
-        return true;
-      }
-      if (origin2.hostname === "localhost" || origin2.hostname === "localhost.") {
-        return true;
-      }
-      if (origin2.hostname.endsWith(".localhost") || origin2.hostname.endsWith(".localhost.")) {
-        return true;
-      }
-      if (origin2.protocol === "file:") {
-        return true;
-      }
-      return false;
-    }
-    function isURLPotentiallyTrustworthy(url2) {
-      if (!webidl.is.URL(url2)) {
-        return false;
-      }
-      if (url2.href === "about:blank" || url2.href === "about:srcdoc") {
-        return true;
-      }
-      if (url2.protocol === "data:") return true;
-      if (url2.protocol === "blob:") return true;
-      return isOriginPotentiallyTrustworthy(url2.origin);
-    }
-    function tryUpgradeRequestToAPotentiallyTrustworthyURL(request) {
-    }
-    function sameOrigin(A3, B3) {
-      if (A3.origin === B3.origin && A3.origin === "null") {
-        return true;
-      }
-      if (A3.protocol === B3.protocol && A3.hostname === B3.hostname && A3.port === B3.port) {
-        return true;
-      }
-      return false;
-    }
-    function isAborted(fetchParams) {
-      return fetchParams.controller.state === "aborted";
-    }
-    function isCancelled(fetchParams) {
-      return fetchParams.controller.state === "aborted" || fetchParams.controller.state === "terminated";
-    }
-    function normalizeMethod(method) {
-      return normalizedMethodRecordsBase[method.toLowerCase()] ?? method;
-    }
-    var esIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
-    function createIterator(name, kInternalIterator, keyIndex = 0, valueIndex = 1) {
-      class FastIterableIterator {
-        /** @type {any} */
-        #target;
-        /** @type {'key' | 'value' | 'key+value'} */
-        #kind;
-        /** @type {number} */
-        #index;
-        /**
-         * @see https://webidl.spec.whatwg.org/#dfn-default-iterator-object
-         * @param {unknown} target
-         * @param {'key' | 'value' | 'key+value'} kind
-         */
-        constructor(target, kind) {
-          this.#target = target;
-          this.#kind = kind;
-          this.#index = 0;
-        }
-        next() {
-          if (typeof this !== "object" || this === null || !(#target in this)) {
-            throw new TypeError(
-              `'next' called on an object that does not implement interface ${name} Iterator.`
-            );
-          }
-          const index = this.#index;
-          const values = kInternalIterator(this.#target);
-          const len = values.length;
-          if (index >= len) {
-            return {
-              value: void 0,
-              done: true
-            };
-          }
-          const { [keyIndex]: key, [valueIndex]: value } = values[index];
-          this.#index = index + 1;
-          let result;
-          switch (this.#kind) {
-            case "key":
-              result = key;
-              break;
-            case "value":
-              result = value;
-              break;
-            case "key+value":
-              result = [key, value];
-              break;
-          }
-          return {
-            value: result,
-            done: false
-          };
-        }
-      }
-      delete FastIterableIterator.prototype.constructor;
-      Object.setPrototypeOf(FastIterableIterator.prototype, esIteratorPrototype);
-      Object.defineProperties(FastIterableIterator.prototype, {
-        [Symbol.toStringTag]: {
-          writable: false,
-          enumerable: false,
-          configurable: true,
-          value: `${name} Iterator`
-        },
-        next: { writable: true, enumerable: true, configurable: true }
-      });
-      return function(target, kind) {
-        return new FastIterableIterator(target, kind);
-      };
-    }
-    function iteratorMixin(name, object, kInternalIterator, keyIndex = 0, valueIndex = 1) {
-      const makeIterator = createIterator(name, kInternalIterator, keyIndex, valueIndex);
-      const properties = {
-        keys: {
-          writable: true,
-          enumerable: true,
-          configurable: true,
-          value: function keys() {
-            webidl.brandCheck(this, object);
-            return makeIterator(this, "key");
-          }
-        },
-        values: {
-          writable: true,
-          enumerable: true,
-          configurable: true,
-          value: function values() {
-            webidl.brandCheck(this, object);
-            return makeIterator(this, "value");
-          }
-        },
-        entries: {
-          writable: true,
-          enumerable: true,
-          configurable: true,
-          value: function entries() {
-            webidl.brandCheck(this, object);
-            return makeIterator(this, "key+value");
-          }
-        },
-        forEach: {
-          writable: true,
-          enumerable: true,
-          configurable: true,
-          value: function forEach2(callbackfn, thisArg = globalThis) {
-            webidl.brandCheck(this, object);
-            webidl.argumentLengthCheck(arguments, 1, `${name}.forEach`);
-            if (typeof callbackfn !== "function") {
-              throw new TypeError(
-                `Failed to execute 'forEach' on '${name}': parameter 1 is not of type 'Function'.`
-              );
-            }
-            for (const { 0: key, 1: value } of makeIterator(this, "key+value")) {
-              callbackfn.call(thisArg, value, key, this);
-            }
-          }
-        }
-      };
-      return Object.defineProperties(object.prototype, {
-        ...properties,
-        [Symbol.iterator]: {
-          writable: true,
-          enumerable: false,
-          configurable: true,
-          value: properties.entries.value
-        }
-      });
-    }
-    function fullyReadBody(body, processBody, processBodyError) {
-      const successSteps = processBody;
-      const errorSteps = processBodyError;
-      try {
-        const reader = body.stream.getReader();
-        readAllBytes(reader, successSteps, errorSteps);
-      } catch (e) {
-        errorSteps(e);
-      }
-    }
-    function readableStreamClose(controller) {
-      try {
-        controller.close();
-        controller.byobRequest?.respond(0);
-      } catch (err) {
-        if (!err.message.includes("Controller is already closed") && !err.message.includes("ReadableStream is already closed")) {
-          throw err;
-        }
-      }
-    }
-    async function readAllBytes(reader, successSteps, failureSteps) {
-      try {
-        const bytes = [];
-        let byteLength = 0;
-        do {
-          const { done, value: chunk } = await reader.read();
-          if (done) {
-            successSteps(Buffer.concat(bytes, byteLength));
-            return;
-          }
-          if (!isUint8Array(chunk)) {
-            failureSteps(new TypeError("Received non-Uint8Array chunk"));
-            return;
-          }
-          bytes.push(chunk);
-          byteLength += chunk.length;
-        } while (true);
-      } catch (e) {
-        failureSteps(e);
-      }
-    }
-    function urlIsLocal(url2) {
-      assert("protocol" in url2);
-      const protocol = url2.protocol;
-      return protocol === "about:" || protocol === "blob:" || protocol === "data:";
-    }
-    function urlHasHttpsScheme(url2) {
-      return typeof url2 === "string" && url2[5] === ":" && url2[0] === "h" && url2[1] === "t" && url2[2] === "t" && url2[3] === "p" && url2[4] === "s" || url2.protocol === "https:";
-    }
-    function urlIsHttpHttpsScheme(url2) {
-      assert("protocol" in url2);
-      const protocol = url2.protocol;
-      return protocol === "http:" || protocol === "https:";
-    }
-    function simpleRangeHeaderValue(value, allowWhitespace) {
-      const data = value;
-      if (!data.startsWith("bytes")) {
-        return "failure";
-      }
-      const position = { position: 5 };
-      if (allowWhitespace) {
-        collectASequenceOfCodePoints(
-          (char) => char === "	" || char === " ",
-          data,
-          position
-        );
-      }
-      if (data.charCodeAt(position.position) !== 61) {
-        return "failure";
-      }
-      position.position++;
-      if (allowWhitespace) {
-        collectASequenceOfCodePoints(
-          (char) => char === "	" || char === " ",
-          data,
-          position
-        );
-      }
-      const rangeStart = collectASequenceOfCodePoints(
-        (char) => {
-          const code = char.charCodeAt(0);
-          return code >= 48 && code <= 57;
-        },
-        data,
-        position
-      );
-      const rangeStartValue = rangeStart.length ? Number(rangeStart) : null;
-      if (allowWhitespace) {
-        collectASequenceOfCodePoints(
-          (char) => char === "	" || char === " ",
-          data,
-          position
-        );
-      }
-      if (data.charCodeAt(position.position) !== 45) {
-        return "failure";
-      }
-      position.position++;
-      if (allowWhitespace) {
-        collectASequenceOfCodePoints(
-          (char) => char === "	" || char === " ",
-          data,
-          position
-        );
-      }
-      const rangeEnd = collectASequenceOfCodePoints(
-        (char) => {
-          const code = char.charCodeAt(0);
-          return code >= 48 && code <= 57;
-        },
-        data,
-        position
-      );
-      const rangeEndValue = rangeEnd.length ? Number(rangeEnd) : null;
-      if (position.position < data.length) {
-        return "failure";
-      }
-      if (rangeEndValue === null && rangeStartValue === null) {
-        return "failure";
-      }
-      if (rangeStartValue !== null && rangeEndValue !== null && rangeStartValue > rangeEndValue) {
-        return "failure";
-      }
-      return { rangeStartValue, rangeEndValue };
-    }
-    function buildContentRange(rangeStart, rangeEnd, fullLength) {
-      let contentRange = "bytes ";
-      contentRange += isomorphicEncode(`${rangeStart}`);
-      contentRange += "-";
-      contentRange += isomorphicEncode(`${rangeEnd}`);
-      contentRange += "/";
-      contentRange += isomorphicEncode(`${fullLength}`);
-      return contentRange;
-    }
-    var InflateStream = class extends Transform {
-      #zlibOptions;
-      /** @param {zlib.ZlibOptions} [zlibOptions] */
-      constructor(zlibOptions2) {
-        super();
-        this.#zlibOptions = zlibOptions2;
-      }
-      _transform(chunk, encoding, callback) {
-        if (!this._inflateStream) {
-          if (chunk.length === 0) {
-            callback();
-            return;
-          }
-          this._inflateStream = (chunk[0] & 15) === 8 ? zlib2.createInflate(this.#zlibOptions) : zlib2.createInflateRaw(this.#zlibOptions);
-          this._inflateStream.on("data", this.push.bind(this));
-          this._inflateStream.on("end", () => this.push(null));
-          this._inflateStream.on("error", (err) => this.destroy(err));
-        }
-        this._inflateStream.write(chunk, encoding, callback);
-      }
-      _final(callback) {
-        if (this._inflateStream) {
-          this._inflateStream.end();
-          this._inflateStream = null;
-        }
-        callback();
-      }
-    };
-    function createInflate(zlibOptions2) {
-      return new InflateStream(zlibOptions2);
-    }
-    function extractMimeType(headers) {
-      let charset = null;
-      let essence = null;
-      let mimeType = null;
-      const values = getDecodeSplit("content-type", headers);
-      if (values === null) {
-        return "failure";
-      }
-      for (const value of values) {
-        const temporaryMimeType = parseMIMEType(value);
-        if (temporaryMimeType === "failure" || temporaryMimeType.essence === "*/*") {
-          continue;
-        }
-        mimeType = temporaryMimeType;
-        if (mimeType.essence !== essence) {
-          charset = null;
-          if (mimeType.parameters.has("charset")) {
-            charset = mimeType.parameters.get("charset");
-          }
-          essence = mimeType.essence;
-        } else if (!mimeType.parameters.has("charset") && charset !== null) {
-          mimeType.parameters.set("charset", charset);
-        }
-      }
-      if (mimeType == null) {
-        return "failure";
-      }
-      return mimeType;
-    }
-    function gettingDecodingSplitting(value) {
-      const input = value;
-      const position = { position: 0 };
-      const values = [];
-      let temporaryValue = "";
-      while (position.position < input.length) {
-        temporaryValue += collectASequenceOfCodePoints(
-          (char) => char !== '"' && char !== ",",
-          input,
-          position
-        );
-        if (position.position < input.length) {
-          if (input.charCodeAt(position.position) === 34) {
-            temporaryValue += collectAnHTTPQuotedString(
-              input,
-              position
-            );
-            if (position.position < input.length) {
-              continue;
-            }
-          } else {
-            assert(input.charCodeAt(position.position) === 44);
-            position.position++;
-          }
-        }
-        temporaryValue = removeChars(temporaryValue, true, true, (char) => char === 9 || char === 32);
-        values.push(temporaryValue);
-        temporaryValue = "";
-      }
-      return values;
-    }
-    function getDecodeSplit(name, list) {
-      const value = list.get(name, true);
-      if (value === null) {
-        return null;
-      }
-      return gettingDecodingSplitting(value);
-    }
-    function hasAuthenticationEntry(request) {
-      return false;
-    }
-    function includesCredentials(url2) {
-      return !!(url2.username || url2.password);
-    }
-    function isTraversableNavigable(navigable) {
-      return navigable != null && navigable !== "client" && navigable !== "no-traversable";
-    }
-    var EnvironmentSettingsObjectBase = class {
-      get baseUrl() {
-        return getGlobalOrigin();
-      }
-      get origin() {
-        return this.baseUrl?.origin;
-      }
-      policyContainer = makePolicyContainer();
-    };
-    var EnvironmentSettingsObject = class {
-      settingsObject = new EnvironmentSettingsObjectBase();
-    };
-    var environmentSettingsObject = new EnvironmentSettingsObject();
-    module2.exports = {
-      isAborted,
-      isCancelled,
-      isValidEncodedURL,
-      ReadableStreamFrom,
-      tryUpgradeRequestToAPotentiallyTrustworthyURL,
-      clampAndCoarsenConnectionTimingInfo,
-      coarsenedSharedCurrentTime,
-      determineRequestsReferrer,
-      makePolicyContainer,
-      clonePolicyContainer,
-      appendFetchMetadata,
-      appendRequestOriginHeader,
-      TAOCheck,
-      corsCheck,
-      crossOriginResourcePolicyCheck,
-      createOpaqueTimingInfo,
-      setRequestReferrerPolicyOnRedirect,
-      isValidHTTPToken,
-      requestBadPort,
-      requestCurrentURL,
-      responseURL,
-      responseLocationURL,
-      isURLPotentiallyTrustworthy,
-      isValidReasonPhrase,
-      sameOrigin,
-      normalizeMethod,
-      iteratorMixin,
-      createIterator,
-      isValidHeaderName: isValidHeaderName2,
-      isValidHeaderValue,
-      isErrorLike,
-      fullyReadBody,
-      readableStreamClose,
-      urlIsLocal,
-      urlHasHttpsScheme,
-      urlIsHttpHttpsScheme,
-      readAllBytes,
-      simpleRangeHeaderValue,
-      buildContentRange,
-      createInflate,
-      extractMimeType,
-      getDecodeSplit,
-      environmentSettingsObject,
-      isOriginIPPotentiallyTrustworthy,
-      hasAuthenticationEntry,
-      includesCredentials,
-      isTraversableNavigable
-    };
-  }
-});
-
-// node_modules/undici/lib/util/runtime-features.js
-var require_runtime_features = __commonJS({
-  "node_modules/undici/lib/util/runtime-features.js"(exports2, module2) {
-    "use strict";
-    var lazyLoaders = {
-      __proto__: null,
-      "node:crypto": () => require("node:crypto"),
-      "node:sqlite": () => require("node:sqlite")
-    };
-    function detectRuntimeFeatureByNodeModule(moduleName) {
-      try {
-        lazyLoaders[moduleName]();
-        return true;
-      } catch (err) {
-        if (err.code !== "ERR_UNKNOWN_BUILTIN_MODULE" && err.code !== "ERR_NO_CRYPTO") {
-          throw err;
-        }
-        return false;
-      }
-    }
-    var runtimeFeaturesAsNodeModule = (
-      /** @type {const} */
-      ["crypto", "sqlite"]
-    );
-    function detectRuntimeFeature(feature) {
-      if (runtimeFeaturesAsNodeModule.includes(
-        /** @type {RuntimeFeatureByNodeModule} */
-        feature
-      )) {
-        return detectRuntimeFeatureByNodeModule(`node:${feature}`);
-      }
-      throw new TypeError(`unknown feature: ${feature}`);
-    }
-    var RuntimeFeatures = class {
-      /** @type {Map<Feature, boolean>} */
-      #map = /* @__PURE__ */ new Map();
-      /**
-       * Clears all cached feature detections.
-       */
-      clear() {
-        this.#map.clear();
-      }
-      /**
-       * @param {Feature} feature
-       * @returns {boolean}
-       */
-      has(feature) {
-        return this.#map.get(feature) ?? this.#detectRuntimeFeature(feature);
-      }
-      /**
-       * @param {Feature} feature
-       * @param {boolean} value
-       */
-      set(feature, value) {
-        if (runtimeFeaturesAsNodeModule.includes(feature) === false) {
-          throw new TypeError(`unknown feature: ${feature}`);
-        }
-        this.#map.set(feature, value);
-      }
-      /**
-       * @param {Feature} feature
-       * @returns {boolean}
-       */
-      #detectRuntimeFeature(feature) {
-        const result = detectRuntimeFeature(feature);
-        this.#map.set(feature, result);
-        return result;
-      }
-    };
-    var instance = new RuntimeFeatures();
-    module2.exports.runtimeFeatures = instance;
-    module2.exports.default = instance;
-  }
-});
-
-// node_modules/undici/lib/web/fetch/formdata.js
-var require_formdata2 = __commonJS({
-  "node_modules/undici/lib/web/fetch/formdata.js"(exports2, module2) {
-    "use strict";
-    var { iteratorMixin } = require_util10();
-    var { kEnumerableProperty } = require_util9();
-    var { webidl } = require_webidl2();
-    var nodeUtil = require("node:util");
-    var { runtimeFeatures } = require_runtime_features();
-    var random = runtimeFeatures.has("crypto") ? require("node:crypto").randomInt : (max) => Math.floor(Math.random() * max);
-    var FormData3 = class _FormData {
-      #state = [];
-      #boundary = null;
-      constructor(form = void 0) {
-        webidl.util.markAsUncloneable(this);
-        if (form !== void 0) {
-          throw webidl.errors.conversionFailed({
-            prefix: "FormData constructor",
-            argument: "Argument 1",
-            types: ["undefined"]
-          });
-        }
-      }
-      append(name, value, filename = void 0) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.append";
-        webidl.argumentLengthCheck(arguments, 2, prefix);
-        name = webidl.converters.USVString(name);
-        if (arguments.length === 3 || webidl.is.Blob(value)) {
-          value = webidl.converters.Blob(value, prefix, "value");
-          if (filename !== void 0) {
-            filename = webidl.converters.USVString(filename);
-          }
-        } else {
-          value = webidl.converters.USVString(value);
-        }
-        const entry = makeEntry(name, value, filename);
-        this.#state.push(entry);
-      }
-      delete(name) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.delete";
-        webidl.argumentLengthCheck(arguments, 1, prefix);
-        name = webidl.converters.USVString(name);
-        this.#state = this.#state.filter((entry) => entry.name !== name);
-      }
-      get(name) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.get";
-        webidl.argumentLengthCheck(arguments, 1, prefix);
-        name = webidl.converters.USVString(name);
-        const idx = this.#state.findIndex((entry) => entry.name === name);
-        if (idx === -1) {
-          return null;
-        }
-        return this.#state[idx].value;
-      }
-      getAll(name) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.getAll";
-        webidl.argumentLengthCheck(arguments, 1, prefix);
-        name = webidl.converters.USVString(name);
-        return this.#state.filter((entry) => entry.name === name).map((entry) => entry.value);
-      }
-      has(name) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.has";
-        webidl.argumentLengthCheck(arguments, 1, prefix);
-        name = webidl.converters.USVString(name);
-        return this.#state.findIndex((entry) => entry.name === name) !== -1;
-      }
-      set(name, value, filename = void 0) {
-        webidl.brandCheck(this, _FormData);
-        const prefix = "FormData.set";
-        webidl.argumentLengthCheck(arguments, 2, prefix);
-        name = webidl.converters.USVString(name);
-        if (arguments.length === 3 || webidl.is.Blob(value)) {
-          value = webidl.converters.Blob(value, prefix, "value");
-          if (filename !== void 0) {
-            filename = webidl.converters.USVString(filename);
-          }
-        } else {
-          value = webidl.converters.USVString(value);
-        }
-        const entry = makeEntry(name, value, filename);
-        const idx = this.#state.findIndex((entry2) => entry2.name === name);
-        if (idx !== -1) {
-          this.#state = [
-            ...this.#state.slice(0, idx),
-            entry,
-            ...this.#state.slice(idx + 1).filter((entry2) => entry2.name !== name)
-          ];
-        } else {
-          this.#state.push(entry);
-        }
-      }
-      [nodeUtil.inspect.custom](depth, options) {
-        const state = this.#state.reduce((a, b2) => {
-          if (a[b2.name]) {
-            if (Array.isArray(a[b2.name])) {
-              a[b2.name].push(b2.value);
-            } else {
-              a[b2.name] = [a[b2.name], b2.value];
-            }
-          } else {
-            a[b2.name] = b2.value;
-          }
-          return a;
-        }, { __proto__: null });
-        options.depth ??= depth;
-        options.colors ??= true;
-        const output = nodeUtil.formatWithOptions(options, state);
-        return `FormData ${output.slice(output.indexOf("]") + 2)}`;
-      }
-      /**
-       * @param {FormData} formData
-       */
-      static getFormDataState(formData) {
-        return formData.#state;
-      }
-      /**
-       * @param {FormData} formData
-       * @param {any[]} newState
-       */
-      static setFormDataState(formData, newState) {
-        formData.#state = newState;
-      }
-      /**
-       * @param {FormData} formData
-       * @returns {string | null}
-       */
-      static getFormDataBoundary(formData) {
-        const boundary = formData.#boundary;
-        if (boundary != null) return boundary;
-        return formData.#boundary = `----formdata-undici-0${`${random(1e11)}`.padStart(11, "0")}`;
-      }
-    };
-    var { getFormDataState, setFormDataState, getFormDataBoundary } = FormData3;
-    Reflect.deleteProperty(FormData3, "getFormDataState");
-    Reflect.deleteProperty(FormData3, "setFormDataState");
-    Reflect.deleteProperty(FormData3, "getFormDataBoundary");
-    iteratorMixin("FormData", FormData3, getFormDataState, "name", "value");
-    Object.defineProperties(FormData3.prototype, {
-      append: kEnumerableProperty,
-      delete: kEnumerableProperty,
-      get: kEnumerableProperty,
-      getAll: kEnumerableProperty,
-      has: kEnumerableProperty,
-      set: kEnumerableProperty,
-      [Symbol.toStringTag]: {
-        value: "FormData",
-        configurable: true
-      }
-    });
-    function makeEntry(name, value, filename) {
-      if (typeof value === "string") {
-      } else {
-        if (!webidl.is.File(value)) {
-          value = new File([value], "blob", { type: value.type });
-        }
-        if (filename !== void 0) {
-          const options = {
-            type: value.type,
-            lastModified: value.lastModified
-          };
-          value = new File([value], filename, options);
-        }
-      }
-      return { name, value };
-    }
-    webidl.is.FormData = webidl.util.MakeTypeAssertion(FormData3);
-    module2.exports = { FormData: FormData3, makeEntry, setFormDataState, getFormDataBoundary };
   }
 });
 
@@ -36708,14 +39769,19 @@ var require_formdata_parser2 = __commonJS({
           input,
           position
         );
-        if (headerValue[0] !== 117 && headerValue[0] !== 85 || // u or U
+        const charsetSeparator = headerValue.indexOf(39);
+        const languageSeparator = charsetSeparator === -1 ? -1 : headerValue.indexOf(39, charsetSeparator + 1);
+        if (charsetSeparator === -1 || languageSeparator === -1) {
+          throw parsingError("expected charset and language separators in extended value");
+        }
+        if (charsetSeparator !== 5 || headerValue[0] !== 117 && headerValue[0] !== 85 || // u or U
         headerValue[1] !== 116 && headerValue[1] !== 84 || // t or T
         headerValue[2] !== 102 && headerValue[2] !== 70 || // f or F
         headerValue[3] !== 45 || // -
         headerValue[4] !== 56) {
-          throw parsingError("unknown encoding, expected utf-8''");
+          throw parsingError("unknown charset, expected utf-8");
         }
-        value = decodeURIComponent(decoder.decode(headerValue.subarray(7)));
+        value = decodeURIComponent(decoder.decode(headerValue.subarray(languageSeparator + 1)));
       } else if (input[position.position] === 34) {
         position.position++;
         const quotedValue = collectASequenceOfBytes(
@@ -36908,7 +39974,6 @@ var require_body2 = __commonJS({
     "use strict";
     var util4 = require_util9();
     var {
-      ReadableStreamFrom,
       readableStreamClose,
       fullyReadBody,
       extractMimeType
@@ -36934,19 +39999,38 @@ var require_body2 = __commonJS({
     });
     function extractBody(object, keepalive = false) {
       let stream4 = null;
-      let controller = null;
       if (webidl.is.ReadableStream(object)) {
         stream4 = object;
       } else if (webidl.is.Blob(object)) {
         stream4 = object.stream();
       } else {
         stream4 = new ReadableStream({
-          pull() {
+          start() {
           },
-          start(c) {
-            controller = c;
+          async pull(controller) {
+            const result = action();
+            const iterator2 = result?.[Symbol.asyncIterator]?.();
+            if (iterator2 == null) {
+              if (result?.length && !isErrored(stream4)) {
+                controller.enqueue(typeof result === "string" ? textEncoder2.encode(result) : new Uint8Array(result));
+              }
+              queueMicrotask(() => readableStreamClose(controller));
+              return;
+            }
+            while (true) {
+              const { value, done } = await iterator2.next();
+              if (done) {
+                queueMicrotask(() => readableStreamClose(controller));
+                return;
+              }
+              if (value.length && !isErrored(stream4)) {
+                controller.enqueue(new Uint8Array(value));
+                return;
+              }
+            }
           },
-          cancel() {
+          cancel(reason) {
+            return action()[Symbol.asyncIterator]?.().return(reason);
           },
           type: "bytes"
         });
@@ -37003,7 +40087,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
           length = null;
         }
         source = object;
-        action = async function* () {
+        const parts = (async function* () {
           for (const part of blobParts) {
             if (part.stream) {
               yield* part.stream();
@@ -37011,7 +40095,8 @@ Content-Type: ${value.type || "application/octet-stream"}\r
               yield part;
             }
           }
-        };
+        })();
+        action = () => parts;
         type = `multipart/form-data; boundary=${boundary}`;
       } else if (webidl.is.Blob(object)) {
         source = object;
@@ -37028,31 +40113,18 @@ Content-Type: ${value.type || "application/octet-stream"}\r
             "Response body object should not be disturbed or locked"
           );
         }
-        stream4 = webidl.is.ReadableStream(object) ? object : ReadableStreamFrom(object);
+        stream4 = webidl.is.ReadableStream(object) ? object : ReadableStream.from(object).pipeThrough(new TransformStream({
+          transform(chunk, controller) {
+            const bytes = isUint8Array(chunk) ? chunk : Buffer.from(chunk);
+            if (bytes.byteLength) {
+              controller.enqueue(bytes);
+            }
+          }
+        }));
       }
       if (typeof source === "string" || isUint8Array(source)) {
-        action = () => {
-          length = typeof source === "string" ? Buffer.byteLength(source) : source.length;
-          return source;
-        };
-      }
-      if (action != null) {
-        ;
-        (async () => {
-          const result = action();
-          const iterator2 = result?.[Symbol.asyncIterator]?.();
-          if (iterator2) {
-            for await (const bytes of iterator2) {
-              if (isErrored(stream4)) break;
-              if (bytes.length) {
-                controller.enqueue(new Uint8Array(bytes));
-              }
-            }
-          } else if (result?.length && !isErrored(stream4)) {
-            controller.enqueue(typeof result === "string" ? textEncoder2.encode(result) : new Uint8Array(result));
-          }
-          queueMicrotask(() => readableStreamClose(controller));
-        })();
+        action = () => source;
+        length = typeof source === "string" ? Buffer.byteLength(source) : source.length;
       }
       const body = { stream: stream4, source, length };
       return [body, type];
@@ -37073,7 +40145,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         source: body.source
       };
     }
-    function bodyMixinMethods(instance, getInternalState) {
+    function bodyMixinMethods(brandCheck, getInternalState) {
       const methods = {
         blob() {
           return consumeBody(this, (bytes) => {
@@ -37084,18 +40156,18 @@ Content-Type: ${value.type || "application/octet-stream"}\r
               mimeType = serializeAMimeType(mimeType);
             }
             return new Blob([bytes], { type: mimeType });
-          }, instance, getInternalState);
+          }, brandCheck, getInternalState);
         },
         arrayBuffer() {
           return consumeBody(this, (bytes) => {
             return new Uint8Array(bytes).buffer;
-          }, instance, getInternalState);
+          }, brandCheck, getInternalState);
         },
         text() {
-          return consumeBody(this, utf8DecodeBytes, instance, getInternalState);
+          return consumeBody(this, utf8DecodeBytes, brandCheck, getInternalState);
         },
         json() {
-          return consumeBody(this, parseJSONFromBytes, instance, getInternalState);
+          return consumeBody(this, parseJSONFromBytes, brandCheck, getInternalState);
         },
         formData() {
           return consumeBody(this, (value) => {
@@ -37121,12 +40193,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
             throw new TypeError(
               'Content-Type was not one of "multipart/form-data" or "application/x-www-form-urlencoded".'
             );
-          }, instance, getInternalState);
+          }, brandCheck, getInternalState);
         },
         bytes() {
           return consumeBody(this, (bytes) => {
             return new Uint8Array(bytes);
-          }, instance, getInternalState);
+          }, brandCheck, getInternalState);
         },
         textStream() {
           const this_ = getInternalState(this);
@@ -37154,12 +40226,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       };
       return methods;
     }
-    function mixinBody(prototype2, getInternalState) {
-      Object.assign(prototype2.prototype, bodyMixinMethods(prototype2, getInternalState));
+    function mixinBody(prototype2, getInternalState, brandCheck) {
+      Object.assign(prototype2.prototype, bodyMixinMethods(brandCheck, getInternalState));
     }
-    function consumeBody(object, convertBytesToJSValue, instance, getInternalState) {
+    function consumeBody(object, convertBytesToJSValue, brandCheck, getInternalState) {
       try {
-        webidl.brandCheck(object, instance);
+        webidl.brandCheck(object, brandCheck);
       } catch (e) {
         return Promise.reject(e);
       }
@@ -37225,6 +40297,7 @@ var require_client_h12 = __commonJS({
       InformationalError,
       BodyTimeoutError,
       HTTPParserError,
+      WebAssemblyNotSupportedError,
       ResponseExceededMaxSizeError
     } = require_errors2();
     var {
@@ -37259,9 +40332,11 @@ var require_client_h12 = __commonJS({
       kOnError,
       kResume,
       kHTTPContext,
-      kClosed
+      kClosed,
+      kUseMilo
     } = require_symbols6();
-    var constants3 = require_constants7();
+    var constants3 = require_constants8();
+    var { H1Parser, getMiloEnabled } = typeof esbuildDetection === "undefined" ? require_parser_h1() : {};
     var EMPTY_BUF = Buffer.alloc(0);
     var FastBuffer = Buffer[Symbol.species];
     var removeAllListeners = util4.removeAllListeners;
@@ -37271,9 +40346,18 @@ var require_client_h12 = __commonJS({
     var kTypeOfService = /* @__PURE__ */ Symbol("kTypeOfService");
     var extractBody;
     function lazyllhttp() {
+      if (typeof WebAssembly === "undefined") {
+        throw new WebAssemblyNotSupportedError();
+      }
       const llhttpWasmData = process.env.JEST_WORKER_ID ? require_llhttp_wasm2() : void 0;
       let mod;
-      let useWasmSIMD = process.arch !== "ppc64";
+      let useWasmSIMD = true;
+      if (process.arch === "ppc64") {
+        const [major, minor] = process.versions.node.split(".").map((n7) => parseInt(n7, 10));
+        if (major < 24 || major === 24 && minor < 12) {
+          useWasmSIMD = false;
+        }
+      }
       if (process.env.UNDICI_NO_WASM_SIMD === "1") {
         useWasmSIMD = false;
       } else if (process.env.UNDICI_NO_WASM_SIMD === "0") {
@@ -37386,10 +40470,10 @@ var require_client_h12 = __commonJS({
     var TIMEOUT_KEEP_ALIVE = 8 | USE_NATIVE_TIMER;
     var Parser2 = class {
       /**
-         * @param {import('./client.js')} client
-         * @param {import('net').Socket} socket
-         * @param {*} llhttp
-         */
+       * @param {import('./client.js')} client
+       * @param {import('net').Socket} socket
+       * @param {*} llhttp
+       */
       constructor(client, socket, { exports: exports3 }) {
         this.llhttp = exports3;
         this.ptr = this.llhttp.llhttp_alloc(constants3.TYPE.RESPONSE);
@@ -37411,7 +40495,8 @@ var require_client_h12 = __commonJS({
         this.bytesRead = 0;
         this.keepAlive = "";
         this.contentLength = -1;
-        this.connectionKeepAlive = false;
+        this.hasTransferEncoding = false;
+        this.connection = "";
         this.maxResponseSize = client[kMaxResponseSize];
       }
       setTimeout(delay, type) {
@@ -37610,6 +40695,7 @@ var require_client_h12 = __commonJS({
        */
       onHeaderValue(buf) {
         let len = this.headers.length;
+        const isContinuation = (len & 1) === 0;
         if ((len & 1) === 1) {
           this.headers.push(buf);
           len += 1;
@@ -37620,9 +40706,9 @@ var require_client_h12 = __commonJS({
         if (key.length === 10) {
           const headerName = util4.bufferToLowerCasedHeaderName(key);
           if (headerName === "keep-alive") {
-            this.keepAlive += buf.toString();
+            this.keepAlive += (isContinuation || this.keepAlive.length === 0 ? "" : ",") + buf.toString();
           } else if (headerName === "connection") {
-            this.connectionKeepAlive = this.headers[len - 1].length === 10 && util4.bufferToLowerCasedHeaderName(this.headers[len - 1]) === "keep-alive";
+            this.connection += (isContinuation || this.connection.length === 0 ? "" : ",") + buf.toString();
           }
         } else if (key.length === 14 && util4.bufferToLowerCasedHeaderName(key) === "content-length") {
           if (this.contentLength === -1) {
@@ -37631,6 +40717,8 @@ var require_client_h12 = __commonJS({
           for (let i = 0; i < buf.length; i++) {
             this.contentLength = this.contentLength * 10 + (buf[i] - 48);
           }
+        } else if (key.length === 17 && util4.bufferToLowerCasedHeaderName(key) === "transfer-encoding") {
+          this.hasTransferEncoding = true;
         }
         this.trackHeader(buf.length);
         return 0;
@@ -37648,7 +40736,7 @@ var require_client_h12 = __commonJS({
        * @param {Buffer} head
        */
       onUpgrade(head) {
-        const { upgrade, client, socket, headers, statusCode } = this;
+        const { upgrade, client, socket, headers, statusCode, statusText } = this;
         assert(upgrade);
         assert(client[kSocket] === socket);
         assert(!socket.destroyed);
@@ -37673,8 +40761,9 @@ var require_client_h12 = __commonJS({
         client[kQueue][client[kRunningIdx]++] = null;
         client.emit("disconnect", client[kUrl], [client], new InformationalError("upgrade"));
         try {
-          request.onRequestUpgrade(statusCode, headers, socket);
+          request.onRequestUpgrade(statusCode, headers, socket, statusText);
         } catch (err) {
+          util4.errorRequest(client, request, err);
           util4.destroy(socket, err);
         }
         client[kResume]();
@@ -37711,7 +40800,13 @@ var require_client_h12 = __commonJS({
         assert(this.timeoutType === TIMEOUT_HEADERS);
         this.statusCode = statusCode;
         this.shouldKeepAlive = shouldKeepAlive || // Override llhttp value which does not allow keepAlive for HEAD.
-        request.method === "HEAD" && !socket[kReset] && this.connectionKeepAlive;
+        request.method === "HEAD" && !socket[kReset] && /(?:^|,)[\t ]*keep-alive[\t ]*(?:,|$)/i.test(this.connection) && !/(?:^|,)[\t ]*close[\t ]*(?:,|$)/i.test(this.connection);
+        if (request.method === "HEAD" || statusCode === 204 || statusCode === 304) {
+          if (request.method !== "HEAD" && (this.contentLength > 0 || this.hasTransferEncoding)) {
+            this.shouldKeepAlive = false;
+          }
+          this.contentLength = -1;
+        }
         if (this.statusCode >= 200) {
           const bodyTimeout = request.bodyTimeout != null ? request.bodyTimeout : client[kBodyTimeout];
           this.setTimeout(bodyTimeout, TIMEOUT_BODY);
@@ -37736,10 +40831,7 @@ var require_client_h12 = __commonJS({
         if (this.shouldKeepAlive && client[kPipelining]) {
           const keepAliveTimeout = this.keepAlive ? util4.parseKeepAliveTimeout(this.keepAlive) : null;
           if (keepAliveTimeout != null) {
-            const timeout = Math.min(
-              keepAliveTimeout - client[kKeepAliveTimeoutThreshold],
-              client[kKeepAliveMaxTimeout]
-            );
+            const timeout = Math.min(keepAliveTimeout - client[kKeepAliveTimeoutThreshold], client[kKeepAliveMaxTimeout]);
             if (timeout <= 0) {
               socket[kReset] = true;
             } else {
@@ -37814,14 +40906,15 @@ var require_client_h12 = __commonJS({
         this.statusText = "";
         this.bytesRead = 0;
         this.contentLength = -1;
+        this.hasTransferEncoding = false;
         this.keepAlive = "";
-        this.connectionKeepAlive = false;
+        this.connection = "";
         this.headers = [];
         this.headersSize = 0;
         if (statusCode < 200) {
           return 0;
         }
-        if (request.method !== "HEAD" && contentLength !== -1 && bytesRead !== contentLength) {
+        if (contentLength !== -1 && bytesRead !== contentLength) {
           util4.destroy(socket, new ResponseContentLengthMismatchError());
           return -1;
         }
@@ -37884,7 +40977,7 @@ var require_client_h12 = __commonJS({
       socket[kIdleSocketValidation] = 0;
       socket[kIdleSocketValidationTimeout] = null;
       socket[kSocketUsed] = false;
-      socket[kParser] = new Parser2(client, socket, llhttpInstance);
+      socket[kParser] = typeof esbuildDetection === "undefined" && (client[kUseMilo] ?? getMiloEnabled()) ? new H1Parser(client, socket) : new Parser2(client, socket, llhttpInstance);
       util4.addListener(socket, "error", onHttpSocketError);
       util4.addListener(socket, "readable", onHttpSocketReadable);
       util4.addListener(socket, "end", onHttpSocketEnd);
@@ -37942,7 +41035,6 @@ var require_client_h12 = __commonJS({
       };
     }
     function onHttpSocketError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       const parser = this[kParser];
       if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
         const parserErr = parser.finish();
@@ -38005,21 +41097,20 @@ var require_client_h12 = __commonJS({
     }
     function clearIdleSocketValidation(socket) {
       if (socket[kIdleSocketValidationTimeout]) {
-        clearTimeout(socket[kIdleSocketValidationTimeout]);
+        clearImmediate(socket[kIdleSocketValidationTimeout]);
         socket[kIdleSocketValidationTimeout] = null;
       }
       socket[kIdleSocketValidation] = 0;
     }
     function scheduleIdleSocketValidation(client, socket) {
       socket[kIdleSocketValidation] = 1;
-      socket[kIdleSocketValidationTimeout] = setTimeout(() => {
+      socket[kIdleSocketValidationTimeout] = setImmediate(() => {
         socket[kIdleSocketValidationTimeout] = null;
         socket[kIdleSocketValidation] = 2;
         if (client[kSocket] === socket && !socket.destroyed) {
           client[kResume]();
         }
-      }, 0);
-      socket[kIdleSocketValidationTimeout].unref?.();
+      });
     }
     function resumeH1(client) {
       const socket = client[kSocket];
@@ -38400,7 +41491,22 @@ upgrade: ${upgrade}\r
         this.expectsPayload = expectsPayload;
         this.header = header;
         this.abort = abort;
+        this.lengthMismatch = false;
         socket[kWriting] = true;
+      }
+      /**
+       * The body doesn't match the declared content-length and strictContentLength
+       * is off. Warn once, and mark the socket so it isn't reused: on the wire this
+       * request's body no longer ends where the server expects, so anything sent
+       * after it on the same connection would be misread.
+       * @returns {void}
+       */
+      onLengthMismatch() {
+        this.socket[kReset] = true;
+        if (!this.lengthMismatch) {
+          this.lengthMismatch = true;
+          process.emitWarning(new RequestContentLengthMismatchError());
+        }
       }
       /**
        * @param {string|Uint8Array} chunk
@@ -38414,7 +41520,7 @@ upgrade: ${upgrade}\r
         if (socket.destroyed) {
           return false;
         }
-        const len = chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
+        let len = chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
         if (!len) {
           return true;
         }
@@ -38422,7 +41528,13 @@ upgrade: ${upgrade}\r
           if (client[kStrictContentLength]) {
             throw new RequestContentLengthMismatchError();
           }
-          process.emitWarning(new RequestContentLengthMismatchError());
+          this.onLengthMismatch();
+          const remaining = contentLength - bytesWritten;
+          if (remaining === 0) {
+            return true;
+          }
+          chunk = (typeof chunk === "string" ? Buffer.from(chunk) : chunk).subarray(0, remaining);
+          len = remaining;
         }
         socket.cork();
         if (bytesWritten === 0) {
@@ -38484,9 +41596,8 @@ ${len.toString(16)}\r
         if (contentLength !== null && bytesWritten !== contentLength) {
           if (client[kStrictContentLength]) {
             throw new RequestContentLengthMismatchError();
-          } else {
-            process.emitWarning(new RequestContentLengthMismatchError());
           }
+          this.onLengthMismatch();
         }
         if (socket[kParser].timeout && socket[kParser].timeoutType === TIMEOUT_HEADERS) {
           if (socket[kParser].timeout.refresh) {
@@ -38521,12 +41632,14 @@ var require_client_h22 = __commonJS({
     var util4 = require_util9();
     var {
       RequestContentLengthMismatchError,
+      ResponseContentLengthMismatchError,
       RequestAbortedError,
       SocketError,
       InformationalError,
       InvalidArgumentError,
       HeadersTimeoutError,
-      BodyTimeoutError
+      BodyTimeoutError,
+      ResponseExceededMaxSizeError
     } = require_errors2();
     var {
       kUrl,
@@ -38555,7 +41668,8 @@ var require_client_h22 = __commonJS({
       kRemoteSettings,
       kHTTP2Stream,
       kHTTP2SessionState,
-      kHTTP2Options
+      kHTTP2Options,
+      kMaxResponseSize
     } = require_symbols6();
     var { channels } = require_diagnostics2();
     var kOpenStreams = /* @__PURE__ */ Symbol("open streams");
@@ -38567,6 +41681,7 @@ var require_client_h22 = __commonJS({
     var kGoAwayReplayAttempts = /* @__PURE__ */ Symbol("goaway replay attempts");
     var kRefusedStreamRetry = /* @__PURE__ */ Symbol("refused stream retry");
     var MAX_GOAWAY_REPLAY_ATTEMPTS = 1;
+    var MIN_PROBE_TIMEOUT = 1e3;
     var extractBody;
     var http23;
     try {
@@ -38668,6 +41783,10 @@ var require_client_h22 = __commonJS({
       const { body } = request;
       return body == null || util4.isBuffer(body) || util4.isBlobLike(body);
     }
+    function hasResponseStarted(request) {
+      const state = request[kRequestStream]?.[kRequestStreamState];
+      return state?.responseReceived === true;
+    }
     function registerGoAwayRefusal(request) {
       const attempts = (request[kGoAwayReplayAttempts] ?? 0) + 1;
       request[kGoAwayReplayAttempts] = attempts;
@@ -38723,6 +41842,9 @@ var require_client_h22 = __commonJS({
         // Armed while the peer advertises MAX_CONCURRENT_STREAMS = 0 and we have
         // work that cannot start. See setNoStreamsTimeout.
         noStreamsTimeout: null,
+        // Armed while a PING checks whether the peer is still there after a
+        // stream timed out. See probeHttp2Session.
+        probeTimeout: null,
         // Sockets start out ref'd. Session ref/unref proxies to the socket, so a
         // single cached flag lets us skip redundant uv ref/unref calls, provided
         // every ref/unref of the session or its socket goes through
@@ -38792,6 +41914,9 @@ var require_client_h22 = __commonJS({
           if (session[kRemoteSettings] === false && client[kRunning] > 0) {
             return true;
           }
+          if (session[kHTTP2SessionState].probeTimeout != null) {
+            return true;
+          }
           if (client[kRunning] >= client[kMaxConcurrentStreams]) {
             return true;
           }
@@ -38824,7 +41949,7 @@ var require_client_h22 = __commonJS({
       const socket = client[kSocket];
       const session = client[kHTTP2Session];
       if (socket?.destroyed === false) {
-        if (client[kSize] === 0 || client[kMaxConcurrentStreams] === 0) {
+        if (session[kOpenStreams] === 0 && client[kSize] === 0) {
           unrefH2Session(session);
         } else {
           refH2Session(session);
@@ -38876,6 +42001,41 @@ var require_client_h22 = __commonJS({
       session[kError] = err;
       resetHttp2Session(session, err);
     }
+    function probeHttp2Session(session, timeout) {
+      const state = session[kHTTP2SessionState];
+      if (state.probeTimeout != null || session.closed || session.destroyed) {
+        return;
+      }
+      try {
+        session.ping(onHttp2ProbeAck.bind(session));
+      } catch {
+        return;
+      }
+      state.probeTimeout = setTimeout(onHttp2ProbeTimeout, Math.max(timeout, MIN_PROBE_TIMEOUT), session).unref();
+    }
+    function clearHttp2ProbeTimeout(session) {
+      const state = session[kHTTP2SessionState];
+      if (state?.probeTimeout != null) {
+        clearTimeout(state.probeTimeout);
+        state.probeTimeout = null;
+      }
+    }
+    function onHttp2ProbeAck() {
+      if (this[kHTTP2SessionState].probeTimeout == null) {
+        return;
+      }
+      clearHttp2ProbeTimeout(this);
+      this[kClient][kResume]();
+    }
+    function onHttp2ProbeTimeout(session) {
+      session[kHTTP2SessionState].probeTimeout = null;
+      if (session.closed || session.destroyed) {
+        return;
+      }
+      const err = new SocketError("HTTP/2: connection unresponsive", util4.getSocketInfo(session[kSocket]));
+      session[kError] = err;
+      resetHttp2Session(session, err);
+    }
     function clearHttp2IdleTimeout(session) {
       const state = session[kHTTP2SessionState];
       if (state?.idleTimeout != null) {
@@ -38918,7 +42078,10 @@ var require_client_h22 = __commonJS({
       }
     }
     function onHttp2RemoteSettings(settings) {
-      this[kClient][kMaxConcurrentStreams] = settings.maxConcurrentStreams ?? this[kClient][kMaxConcurrentStreams];
+      const client = this[kClient];
+      const localMaxConcurrentStreams = client[kHTTP2Options].maxConcurrentStreams;
+      const remoteMaxConcurrentStreams = settings.maxConcurrentStreams ?? client[kMaxConcurrentStreams] ?? localMaxConcurrentStreams;
+      client[kMaxConcurrentStreams] = Math.min(remoteMaxConcurrentStreams, localMaxConcurrentStreams);
       if (this[kRemoteSettings] === true && this[kEnableConnectProtocol] === true && settings.enableConnectProtocol === false) {
         const err = new InformationalError("HTTP/2: Server disabled extended CONNECT protocol against RFC-8441");
         this[kSocket][kError] = err;
@@ -38950,7 +42113,6 @@ var require_client_h22 = __commonJS({
       }
     }
     function onHttp2SessionError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
       if (this[kReceivedGoAway]) {
         return;
@@ -38981,8 +42143,9 @@ var require_client_h22 = __commonJS({
       for (let i = pendingIdx; i < previousPendingIdx; i++) {
         const request = client[kQueue][i];
         if (request != null) {
+          const responseStarted = hasResponseStarted(request);
           streamsToClose.push(detachRequestStreamForClose(request));
-          if (canReplayRequest(request) && registerGoAwayRefusal(request)) {
+          if (!responseStarted && canReplayRequest(request) && registerGoAwayRefusal(request)) {
             retriableRequests.push(request);
           } else {
             util4.errorRequest(client, request, err);
@@ -39002,8 +42165,12 @@ var require_client_h22 = __commonJS({
         client[kHTTPContext] = null;
         client[kHTTP2Session] = null;
       }
+      if (this[kOpenStreams] === 0) {
+        unrefH2Session(this);
+      }
       clearHttp2IdleTimeout(this);
       clearNoStreamsTimeout(this);
+      clearHttp2ProbeTimeout(this);
       if (!this.closed && !this.destroyed) {
         this.close();
       }
@@ -39021,6 +42188,7 @@ var require_client_h22 = __commonJS({
       }
       clearHttp2IdleTimeout(this);
       clearNoStreamsTimeout(this);
+      clearHttp2ProbeTimeout(this);
       if (state.ping.interval != null) {
         clearInterval(state.ping.interval);
         state.ping.interval = null;
@@ -39057,7 +42225,6 @@ var require_client_h22 = __commonJS({
       client[kResume]();
     }
     function onHttp2SocketError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kError] = err;
       if (this[kHTTP2Session]?.[kReceivedGoAway]) {
         return;
@@ -39074,9 +42241,10 @@ var require_client_h22 = __commonJS({
     }
     function closeStreamSession(stream4) {
       const session = stream4[kHTTP2Session];
+      const client = session[kClient];
       stream4[kHTTP2Session] = null;
       session[kOpenStreams] -= 1;
-      if (session[kOpenStreams] === 0) {
+      if (session[kOpenStreams] === 0 && (client[kSize] === 0 || session[kReceivedGoAway])) {
         unrefH2Session(session);
         setHttp2IdleTimeout(session);
       }
@@ -39115,21 +42283,21 @@ var require_client_h22 = __commonJS({
       for (let n7 = 0; n7 < reqHeaders.length; n7 += 2) {
         const key = reqHeaders[n7 + 0];
         const val = reqHeaders[n7 + 1];
-        const current = headers[key];
+        const current = Object.hasOwn(headers, key) ? headers[key] : void 0;
         if (key === "cookie") {
           if (current != null) {
-            headers[key] = Array.isArray(current) ? (current.push(val), current) : [current, val];
+            util4.setHeader(headers, key, Array.isArray(current) ? (current.push(val), current) : [current, val]);
           } else {
-            headers[key] = val;
+            util4.setHeader(headers, key, val);
           }
           continue;
         }
         if (typeof val === "string") {
-          headers[key] = current ? `${current}, ${val}` : val;
+          util4.setHeader(headers, key, current ? `${current}, ${val}` : val);
           continue;
         }
         for (let i = 0; i < val.length; i++) {
-          headers[key] = headers[key] ? `${headers[key]}, ${val[i]}` : val[i];
+          util4.setHeader(headers, key, Object.hasOwn(headers, key) ? `${headers[key]}, ${val[i]}` : val[i]);
         }
       }
       return headers;
@@ -39191,8 +42359,13 @@ var require_client_h22 = __commonJS({
       state.responseReceived = true;
       const statusCode = headers[HTTP2_HEADER_STATUS];
       delete headers[HTTP2_HEADER_STATUS];
-      request.onRequestUpgrade(statusCode, headers, stream4);
-      if (request.aborted || request.completed) {
+      try {
+        request.onRequestUpgrade(statusCode, headers, stream4);
+      } catch (err) {
+        state.abort(err);
+        return;
+      }
+      if (request.aborted) {
         return;
       }
       removeUpgradeStreamListeners(stream4);
@@ -39259,13 +42432,16 @@ var require_client_h22 = __commonJS({
       const state = {
         abort: null,
         body: request.body,
+        bytesRead: 0,
         client,
         contentLength: null,
         expectsPayload: false,
+        maxResponseSize: client[kMaxResponseSize],
         request,
         headersTimeout,
         bodyTimeout,
         requestFinalized: false,
+        responseContentLength: null,
         responseReceived: false,
         bodySent: false,
         pendingEnd: false,
@@ -39400,6 +42576,7 @@ var require_client_h22 = __commonJS({
         stream4.once("continue", writeBodyH2);
       }
       stream4.on("response", onResponse);
+      stream4.on("headers", onInterimResponse);
       stream4.on("end", onEnd);
       stream4.on("error", onError);
       stream4.on("frameError", onFrameError);
@@ -39417,6 +42594,7 @@ var require_client_h22 = __commonJS({
       stream4.off("error", noop2);
       stream4.off("continue", writeBodyH2);
       stream4.off("response", onResponse);
+      stream4.off("headers", onInterimResponse);
       stream4.off("end", onEnd);
       stream4.off("error", onError);
       stream4.off("frameError", onFrameError);
@@ -39448,13 +42626,50 @@ var require_client_h22 = __commonJS({
       if (state == null) {
         return;
       }
+      const { request, maxResponseSize, responseContentLength } = state;
+      if (request.aborted || request.completed) {
+        return;
+      }
+      if (responseContentLength != null && state.bytesRead + chunk.length > responseContentLength) {
+        state.abort(new ResponseContentLengthMismatchError());
+        return;
+      }
+      if (maxResponseSize > -1 && state.bytesRead + chunk.length > maxResponseSize) {
+        state.abort(new ResponseExceededMaxSizeError());
+        return;
+      }
+      state.bytesRead += chunk.length;
+      if (request.onResponseData(chunk) === false) {
+        pauseResponseStream(stream4, state);
+      }
+    }
+    function pauseResponseStream(stream4, state) {
+      stream4.pause();
+      if (state.bodyTimeout) {
+        stream4.setTimeout(0);
+      }
+    }
+    function resumeResponseStream() {
+      const stream4 = this;
+      const state = stream4[kRequestStreamState];
+      if (state != null && state.bodyTimeout && stream4.isPaused()) {
+        stream4.setTimeout(state.bodyTimeout);
+      }
+      stream4.resume();
+    }
+    function onInterimResponse(headers) {
+      const stream4 = this;
+      const state = stream4[kRequestStreamState];
+      if (state == null) {
+        return;
+      }
       const { request } = state;
       if (request.aborted || request.completed) {
         return;
       }
-      if (request.onResponseData(chunk) === false) {
-        stream4.pause();
-      }
+      const statusCode = headers[HTTP2_HEADER_STATUS];
+      delete headers[HTTP2_HEADER_STATUS];
+      request.onResponseStart(Number(statusCode), headers, noop2, "");
     }
     function onResponse(headers) {
       const stream4 = this;
@@ -39468,10 +42683,14 @@ var require_client_h22 = __commonJS({
         stream4.removeListener("continue", writeBodyH2);
         stream4.end();
       }
-      const statusCode = headers[HTTP2_HEADER_STATUS];
+      const statusCode = Number(headers[HTTP2_HEADER_STATUS]);
       delete headers[HTTP2_HEADER_STATUS];
       request.onResponseStarted();
       state.responseReceived = true;
+      if (request.method !== "HEAD" && statusCode !== 304) {
+        const contentLength = headers[HTTP2_HEADER_CONTENT_LENGTH];
+        state.responseContentLength = contentLength == null ? null : Number(contentLength);
+      }
       if (state.headersTimeout || state.bodyTimeout) {
         stream4.setTimeout(state.bodyTimeout);
       }
@@ -39479,8 +42698,8 @@ var require_client_h22 = __commonJS({
         releaseRequestStream(stream4);
         return;
       }
-      if (request.onResponseStart(Number(statusCode), headers, stream4.resume.bind(stream4), "") === false) {
-        stream4.pause();
+      if (request.onResponseStart(statusCode, headers, resumeResponseStream.bind(stream4), "") === false) {
+        pauseResponseStream(stream4, state);
       }
       stream4.on("data", onData);
     }
@@ -39494,6 +42713,10 @@ var require_client_h22 = __commonJS({
       stream4.off("end", onEnd);
       if (state.responseReceived) {
         if (!request.aborted && !request.completed) {
+          if (state.responseContentLength != null && state.bytesRead !== state.responseContentLength) {
+            state.abort(new ResponseContentLengthMismatchError());
+            return;
+          }
           state.pendingEnd = true;
           completeRequestStream.call(stream4);
         }
@@ -39522,6 +42745,9 @@ var require_client_h22 = __commonJS({
         return;
       }
       stream4.off("error", onError);
+      if (state.responseContentLength != null && state.bytesRead !== state.responseContentLength) {
+        err = new ResponseContentLengthMismatchError();
+      }
       if (typeof stream4.rstCode === "number" && stream4.rstCode !== NGHTTP2_NO_ERROR) {
         err.http2ErrorCode = stream4.rstCode;
       }
@@ -39549,7 +42775,9 @@ var require_client_h22 = __commonJS({
         return;
       }
       stream4.off("timeout", onTimeout);
-      const err = state.responseReceived ? new BodyTimeoutError(`HTTP/2: "stream timeout after ${state.bodyTimeout}"`) : new HeadersTimeoutError(`HTTP/2: "headers timeout after ${state.headersTimeout}"`);
+      const { responseReceived, session, bodyTimeout, headersTimeout } = state;
+      const err = responseReceived ? new BodyTimeoutError(`HTTP/2: "stream timeout after ${bodyTimeout}"`) : new HeadersTimeoutError(`HTTP/2: "headers timeout after ${headersTimeout}"`);
+      probeHttp2Session(session, responseReceived ? bodyTimeout : headersTimeout);
       state.abort(err);
     }
     function onTrailers(trailers) {
@@ -39810,7 +43038,8 @@ var require_client2 = __commonJS({
       kMaxConcurrentStreams,
       kHostAuthority,
       kResume,
-      kHTTP2Options
+      kHTTP2Options,
+      kUseMilo
     } = require_symbols6();
     var connectH1 = require_client_h12();
     var connectH2 = require_client_h22();
@@ -39874,8 +43103,10 @@ var require_client2 = __commonJS({
         initialWindowSize,
         connectionWindowSize,
         pingInterval,
+        useMilo,
         webSocket,
-        h2Options
+        h2Options,
+        eventSource
       } = {}) {
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
@@ -39946,7 +43177,7 @@ var require_client2 = __commonJS({
             if (h2Options.settings?.initialWindowSize != null && (!Number.isInteger(h2Options.settings.initialWindowSize) || h2Options.settings.initialWindowSize < 1)) {
               throw new InvalidArgumentError("h2Options.settings.initialWindowSize must be a positive integer, greater than 0");
             }
-            if (h2Options.maxConcurrentStreams != null && (!Number.isInteger(h2Options.connectionWindowSize) || h2Options.maxConcurrentStreams < 1)) {
+            if (h2Options.maxConcurrentStreams != null && (!Number.isInteger(h2Options.maxConcurrentStreams) || h2Options.maxConcurrentStreams < 1)) {
               throw new InvalidArgumentError("h2Options.maxConcurrentStreams must be a positive integer, greater than 0");
             }
             if (h2Options.connectionWindowSize != null && (!Number.isInteger(h2Options.connectionWindowSize) || h2Options.connectionWindowSize < 1)) {
@@ -39978,7 +43209,7 @@ var require_client2 = __commonJS({
             }
           }
         }
-        super({ webSocket });
+        super({ webSocket, eventSource });
         if (typeof connect2 !== "function") {
           connect2 = buildConnector({
             ...tls,
@@ -40035,6 +43266,7 @@ var require_client2 = __commonJS({
             initialWindowSize: h2Options?.initialWindowSize ?? initialWindowSize ?? 262144
           }
         };
+        this[kUseMilo] = useMilo;
         this[kQueue] = [];
         this[kRunningIdx] = 0;
         this[kPendingIdx] = 0;
@@ -40305,6 +43537,10 @@ var require_client2 = __commonJS({
         if (request === null) {
           return;
         }
+        if (request.aborted) {
+          client[kQueue].splice(client[kPendingIdx], 1);
+          continue;
+        }
         if (client[kUrl].protocol === "https:" && client[kServerName] !== request.servername) {
           if (client[kRunning] > 0) {
             return;
@@ -40415,6 +43651,7 @@ var require_fixed_queue2 = __commonJS({
 var require_pool_base2 = __commonJS({
   "node_modules/undici/lib/dispatcher/pool-base.js"(exports2, module2) {
     "use strict";
+    var { AsyncResource } = require("node:async_hooks");
     var { PoolStats } = require_stats();
     var DispatcherBase = require_dispatcher_base2();
     var FixedQueue = require_fixed_queue2();
@@ -40427,40 +43664,106 @@ var require_pool_base2 = __commonJS({
     var kOnConnect = /* @__PURE__ */ Symbol("onConnect");
     var kOnDisconnect = /* @__PURE__ */ Symbol("onDisconnect");
     var kOnConnectionError = /* @__PURE__ */ Symbol("onConnectionError");
+    var kOnClientBusy = /* @__PURE__ */ Symbol("on client busy");
+    var kOnClientDrain = /* @__PURE__ */ Symbol("on client drain");
+    var kDrainQueue = /* @__PURE__ */ Symbol("drain queue");
     var kGetDispatcher = /* @__PURE__ */ Symbol("get dispatcher");
     var kHasDispatcher = /* @__PURE__ */ Symbol("has dispatcher");
     var kAddClient = /* @__PURE__ */ Symbol("add client");
     var kRemoveClient = /* @__PURE__ */ Symbol("remove client");
+    var kRetireClient = /* @__PURE__ */ Symbol("retire client");
+    var kRetiring = /* @__PURE__ */ Symbol("retiring clients");
+    var QueuedRequest = class extends AsyncResource {
+      constructor(opts, handler) {
+        super("UNDICI_POOL_QUEUED_REQUEST");
+        this.opts = opts;
+        this.handler = handler;
+      }
+      dispatch(dispatcher) {
+        return this.runInAsyncScope(dispatcher.dispatch, dispatcher, this.opts, this.handler);
+      }
+    };
+    function closeClients(pool) {
+      const closeAll = [];
+      for (let i = 0; i < pool[kClients].length; i++) {
+        const client = pool[kClients][i];
+        if (!client.destroyed) {
+          closeAll.push(client.close());
+        }
+      }
+      for (const closed of pool[kRetiring].values()) {
+        closeAll.push(closed);
+      }
+      return Promise.all(closeAll);
+    }
     var PoolBase = class extends DispatcherBase {
       [kQueue] = new FixedQueue();
       [kQueued] = 0;
       [kClients] = [];
+      // Clients removed from kClients that have not finished closing,
+      // mapped to a promise that settles once they have.
+      [kRetiring] = /* @__PURE__ */ new Map();
       [kNeedDrain] = false;
       [kOnDrain](client, origin2, targets) {
+        if (client.closed || client.destroyed) {
+          return;
+        }
         const queue = this[kQueue];
         let needDrain = false;
+        this[kOnClientDrain](client);
         while (!needDrain) {
           const item = queue.shift();
           if (!item) {
             break;
           }
           this[kQueued]--;
-          needDrain = !client.dispatch(item.opts, item.handler);
+          needDrain = !item.dispatch(client);
         }
         client[kNeedDrain] = needDrain;
+        if (needDrain) {
+          this[kOnClientBusy](client);
+          if (!queue.isEmpty()) {
+            return this[kDrainQueue](origin2, targets);
+          }
+        }
         if (!needDrain && this[kNeedDrain]) {
           this[kNeedDrain] = false;
           this.emit("drain", origin2, [this, ...targets]);
         }
         if (this[kClosedResolve] && queue.isEmpty()) {
-          const closeAll = [];
-          for (let i = 0; i < this[kClients].length; i++) {
-            const client2 = this[kClients][i];
-            if (!client2.destroyed) {
-              closeAll.push(client2.close());
+          return closeClients(this).then(this[kClosedResolve]);
+        }
+      }
+      [kOnClientBusy]() {
+      }
+      [kOnClientDrain]() {
+      }
+      [kDrainQueue](origin2, targets) {
+        const queue = this[kQueue];
+        let hasDispatcher = true;
+        while (!queue.isEmpty()) {
+          const dispatcher = this[kGetDispatcher]();
+          if (!dispatcher) {
+            hasDispatcher = false;
+            break;
+          }
+          const item = queue.shift();
+          this[kQueued]--;
+          if (!item.dispatch(dispatcher)) {
+            dispatcher[kNeedDrain] = true;
+            this[kOnClientBusy](dispatcher);
+            hasDispatcher = this[kHasDispatcher]();
+            if (!hasDispatcher) {
+              break;
             }
           }
-          return Promise.all(closeAll).then(this[kClosedResolve]);
+        }
+        if (hasDispatcher && this[kNeedDrain]) {
+          this[kNeedDrain] = false;
+          this.emit("drain", origin2, [this, ...targets]);
+        }
+        if (this[kClosedResolve] && queue.isEmpty()) {
+          return closeClients(this).then(this[kClosedResolve]);
         }
       }
       [kOnConnect] = (origin2, targets) => {
@@ -40515,14 +43818,7 @@ var require_pool_base2 = __commonJS({
       }
       [kClose]() {
         if (this[kQueue].isEmpty()) {
-          const closeAll = [];
-          for (let i = 0; i < this[kClients].length; i++) {
-            const client = this[kClients][i];
-            if (!client.destroyed) {
-              closeAll.push(client.close());
-            }
-          }
-          return Promise.all(closeAll);
+          return closeClients(this);
         } else {
           return new Promise((resolve) => {
             this[kClosedResolve] = resolve;
@@ -40541,16 +43837,20 @@ var require_pool_base2 = __commonJS({
         for (let i = 0; i < this[kClients].length; i++) {
           destroyAll[i] = this[kClients][i].destroy(err);
         }
+        for (const client of this[kRetiring].keys()) {
+          destroyAll.push(client.destroy(err));
+        }
         return Promise.all(destroyAll);
       }
       [kDispatch](opts, handler) {
         const dispatcher = this[kGetDispatcher]();
         if (!dispatcher) {
           this[kNeedDrain] = true;
-          this[kQueue].push({ opts, handler });
+          this[kQueue].push(new QueuedRequest(opts, handler));
           this[kQueued]++;
         } else if (!dispatcher.dispatch(opts, handler)) {
           dispatcher[kNeedDrain] = true;
+          this[kOnClientBusy](dispatcher);
           this[kNeedDrain] = !this[kHasDispatcher]();
         }
         return !this[kNeedDrain];
@@ -40569,20 +43869,41 @@ var require_pool_base2 = __commonJS({
         this[kClients].push(client);
         if (this[kNeedDrain]) {
           queueMicrotask(() => {
-            if (this[kNeedDrain]) {
+            if (this[kNeedDrain] && !client[kNeedDrain]) {
               this[kOnDrain](client, client[kUrl], [client, this]);
             }
           });
         }
         return this;
       }
-      [kRemoveClient](client) {
+      // Takes a client out of rotation. A closed client no longer takes requests
+      // from the pool queue (see kOnDrain), but it finishes the requests it
+      // already has. Until it has, pool.close() waits for it and pool.destroy()
+      // destroys it.
+      [kRetireClient](client) {
         const idx = this[kClients].indexOf(client);
         if (idx !== -1) {
           this[kClients].splice(idx, 1);
         }
-        client.close(() => {
+        if (client.destroyed || this[kRetiring].has(client)) {
+          return;
+        }
+        let done = false;
+        let resolveClosed;
+        const closed = new Promise((resolve) => {
+          resolveClosed = resolve;
         });
+        this[kRetiring].set(client, closed);
+        client.close(() => {
+          if (!done) {
+            done = true;
+            this[kRetiring].delete(client);
+            resolveClosed();
+          }
+        });
+      }
+      [kRemoveClient](client) {
+        this[kRetireClient](client);
         this[kNeedDrain] = !this[kClients].some((dispatcher) => !dispatcher[kNeedDrain] && dispatcher.closed !== true && dispatcher.destroyed !== true);
       }
     };
@@ -40592,6 +43913,10 @@ var require_pool_base2 = __commonJS({
       kNeedDrain,
       kAddClient,
       kRemoveClient,
+      kRetireClient,
+      kDrainQueue,
+      kOnClientBusy,
+      kOnClientDrain,
       kGetDispatcher,
       kHasDispatcher
     };
@@ -40607,22 +43932,39 @@ var require_pool2 = __commonJS({
       kClients,
       kNeedDrain,
       kAddClient,
+      kDrainQueue,
+      kOnClientBusy,
+      kOnClientDrain,
       kGetDispatcher,
       kHasDispatcher,
-      kRemoveClient
+      kRemoveClient,
+      kRetireClient
     } = require_pool_base2();
     var Client = require_client2();
     var {
       InvalidArgumentError
     } = require_errors2();
     var util4 = require_util9();
-    var { kUrl } = require_symbols6();
+    var { kConnecting, kHTTPContext, kUrl, kQueued } = require_symbols6();
     var buildConnector = require_connect2();
     var kOptions = /* @__PURE__ */ Symbol("options");
     var kConnections = /* @__PURE__ */ Symbol("connections");
     var kFactory = /* @__PURE__ */ Symbol("factory");
+    var kProtocol = /* @__PURE__ */ Symbol("protocol");
+    var kProtocolProbe = /* @__PURE__ */ Symbol("protocol probe");
     function defaultFactory(origin2, opts) {
       return new Client(origin2, opts);
+    }
+    function shouldCreateProtocolProbe(pool, dispatcher) {
+      return dispatcher instanceof Client && pool[kProtocol] !== "h1" && (pool[kOptions].useH2c === true || pool[kUrl].protocol === "https:" && pool[kOptions].allowH2 !== false);
+    }
+    function createClient(pool) {
+      const dispatcher = pool[kFactory](pool[kUrl], pool[kOptions]);
+      if (shouldCreateProtocolProbe(pool, dispatcher)) {
+        pool[kProtocolProbe] = dispatcher;
+      }
+      pool[kAddClient](dispatcher);
+      return dispatcher;
     }
     var Pool = class extends PoolBase {
       constructor(origin2, {
@@ -40666,21 +44008,56 @@ var require_pool2 = __commonJS({
         this[kUrl] = util4.parseOrigin(origin2);
         this[kOptions] = { ...util4.deepClone(options), connect, allowH2, useH2c, clientTtl, socketPath };
         this[kFactory] = factory2;
+        this[kProtocol] = null;
+        this[kProtocolProbe] = null;
         this.on("connect", (origin3, targets) => {
           if (clientTtl != null && clientTtl > 0) {
             for (const target of targets) {
               Object.assign(target, { ttl: Date.now() });
             }
           }
-        });
-        this.on("connectionError", (origin3, targets, error2) => {
-          for (const target of targets) {
-            const idx = this[kClients].indexOf(target);
-            if (idx !== -1) {
-              this[kClients].splice(idx, 1);
+          const client = targets[targets.length - 1];
+          if (client instanceof Client) {
+            this[kProtocol] = client[kHTTPContext]?.version;
+          }
+          if (client === this[kProtocolProbe]) {
+            if (this[kProtocol] !== "h2") {
+              this[kProtocolProbe] = null;
+              this[kDrainQueue](origin3, targets.slice(1));
             }
           }
         });
+        this.on("disconnect", (origin3, targets) => {
+          if (targets.includes(this[kProtocolProbe])) {
+            this[kProtocolProbe] = null;
+            this[kDrainQueue](origin3, targets.slice(1));
+          }
+        });
+        this.on("connectionError", (origin3, targets) => {
+          let resumeQueued = false;
+          for (const target of targets) {
+            if (target === this[kProtocolProbe]) {
+              this[kProtocolProbe] = null;
+              resumeQueued = true;
+            }
+            if (this[kClients].includes(target)) {
+              this[kRetireClient](target);
+            }
+          }
+          if (resumeQueued || this[kQueued] > 0) {
+            this[kDrainQueue](origin3, targets.slice(1));
+          }
+        });
+      }
+      [kOnClientBusy](client) {
+        if (this[kProtocolProbe] === null && client[kConnecting] && shouldCreateProtocolProbe(this, client)) {
+          this[kProtocolProbe] = client;
+        }
+      }
+      [kOnClientDrain](client) {
+        if (client === this[kProtocolProbe]) {
+          this[kProtocolProbe] = null;
+        }
       }
       [kGetDispatcher]() {
         const clientTtlOption = this[kOptions].clientTtl;
@@ -40693,10 +44070,11 @@ var require_pool2 = __commonJS({
             return client;
           }
         }
+        if (this[kProtocolProbe] !== null) {
+          return;
+        }
         if (!this[kConnections] || this[kClients].length < this[kConnections]) {
-          const dispatcher = this[kFactory](this[kUrl], this[kOptions]);
-          this[kAddClient](dispatcher);
-          return dispatcher;
+          return createClient(this);
         }
       }
       [kHasDispatcher]() {
@@ -40710,9 +44088,11 @@ var require_pool2 = __commonJS({
             return true;
           }
         }
+        if (this[kProtocolProbe] !== null) {
+          return false;
+        }
         if (!this[kConnections] || this[kClients].length < this[kConnections]) {
-          const dispatcher = this[kFactory](this[kUrl], this[kOptions]);
-          this[kAddClient](dispatcher);
+          createClient(this);
           return true;
         }
         return false;
@@ -40739,7 +44119,7 @@ var require_balanced_pool2 = __commonJS({
       kGetDispatcher
     } = require_pool_base2();
     var Pool = require_pool2();
-    var { kUrl } = require_symbols6();
+    var { kOriginless, kUrl } = require_symbols6();
     var util4 = require_util9();
     var kFactory = /* @__PURE__ */ Symbol("factory");
     var kOptions = /* @__PURE__ */ Symbol("options");
@@ -40762,12 +44142,15 @@ var require_balanced_pool2 = __commonJS({
       return new Pool(origin2, opts);
     }
     var BalancedPool = class extends PoolBase {
-      constructor(upstreams = [], { factory: factory2 = defaultFactory, ...opts } = {}) {
+      constructor(upstreams = [], { factory: factory2 = defaultFactory, connect, tls, ...opts } = {}) {
         if (typeof factory2 !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
-        super();
-        this[kOptions] = { ...util4.deepClone(opts) };
+        super(opts);
+        this[kOriginless] = true;
+        if (connect && typeof connect !== "function") connect = { ...connect };
+        if (tls && typeof tls !== "function") tls = { ...tls };
+        this[kOptions] = { ...util4.deepClone(opts), connect, tls };
         this[kIndex] = -1;
         this[kCurrentWeight] = 0;
         this[kMaxWeightPerServer] = this[kOptions].maxWeightPerServer || 100;
@@ -40878,14 +44261,16 @@ var require_round_robin_pool = __commonJS({
       kAddClient,
       kGetDispatcher,
       kHasDispatcher,
-      kRemoveClient
+      kRemoveClient,
+      kRetireClient,
+      kDrainQueue
     } = require_pool_base2();
     var Client = require_client2();
     var {
       InvalidArgumentError
     } = require_errors2();
     var util4 = require_util9();
-    var { kUrl } = require_symbols6();
+    var { kUrl, kQueued } = require_symbols6();
     var buildConnector = require_connect2();
     var kOptions = /* @__PURE__ */ Symbol("options");
     var kConnections = /* @__PURE__ */ Symbol("connections");
@@ -40929,7 +44314,7 @@ var require_round_robin_pool = __commonJS({
             ...connect
           });
         }
-        super();
+        super(options);
         this[kConnections] = connections || null;
         this[kUrl] = util4.parseOrigin(origin2);
         this[kOptions] = { ...util4.deepClone(options), connect, allowH2, clientTtl, socketPath };
@@ -40944,10 +44329,12 @@ var require_round_robin_pool = __commonJS({
         });
         this.on("connectionError", (origin3, targets, error2) => {
           for (const target of targets) {
-            const idx = this[kClients].indexOf(target);
-            if (idx !== -1) {
-              this[kClients].splice(idx, 1);
+            if (this[kClients].includes(target)) {
+              this[kRetireClient](target);
             }
+          }
+          if (this[kQueued] > 0) {
+            this[kDrainQueue](origin3, targets.slice(1));
           }
         });
       }
@@ -41009,7 +44396,7 @@ var require_agent3 = __commonJS({
   "node_modules/undici/lib/dispatcher/agent.js"(exports2, module2) {
     "use strict";
     var { InvalidArgumentError, MaxOriginsReachedError } = require_errors2();
-    var { kBusy, kClients, kConnected, kRunning, kClose, kDestroy, kDispatch, kUrl } = require_symbols6();
+    var { kBusy, kClients, kConnected, kRunning, kPending, kClose, kDestroy, kDispatch, kUrl } = require_symbols6();
     var DispatcherBase = require_dispatcher_base2();
     var Pool = require_pool2();
     var Client = require_client2();
@@ -41025,7 +44412,7 @@ var require_agent3 = __commonJS({
       return opts && opts.connections === 1 ? new Client(origin2, opts) : new Pool(origin2, opts);
     }
     var Agent2 = class extends DispatcherBase {
-      constructor({ factory: factory2 = defaultFactory, maxOrigins = Infinity, connect, ...options } = {}) {
+      constructor({ factory: factory2 = defaultFactory, maxOrigins = Infinity, connect, tls, ...options } = {}) {
         if (typeof factory2 !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -41039,7 +44426,10 @@ var require_agent3 = __commonJS({
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
-        this[kOptions] = { ...util4.deepClone(options), maxOrigins, connect };
+        if (tls && typeof tls !== "function") {
+          tls = { ...tls };
+        }
+        this[kOptions] = { ...util4.deepClone(options), maxOrigins, connect, tls };
         this[kFactory] = factory2;
         this[kClients] = /* @__PURE__ */ new Map();
         this[kOrigins] = /* @__PURE__ */ new Set();
@@ -41082,7 +44472,7 @@ var require_agent3 = __commonJS({
             if (this[kClients].get(key) !== dispatcher) {
               return;
             }
-            if (dispatcher[kConnected] > 0 || dispatcher[kBusy]) {
+            if (dispatcher[kConnected] > 0 || dispatcher[kBusy] || dispatcher[kPending] > 0) {
               return;
             }
             this[kClients].delete(key);
@@ -41149,6 +44539,7 @@ var require_dispatcher1_wrapper = __commonJS({
     var Dispatcher = require_dispatcher2();
     var { InvalidArgumentError } = require_errors2();
     var { toRawHeaders } = require_util9();
+    var { kOriginless, kUrl } = require_symbols6();
     var LegacyHandlerWrapper = class {
       #handler;
       constructor(handler) {
@@ -41158,11 +44549,11 @@ var require_dispatcher1_wrapper = __commonJS({
         this.#handler.onConnect?.((reason) => controller.abort(reason), context);
       }
       onRequestUpgrade(controller, statusCode, headers, socket) {
-        const rawHeaders = controller?.rawHeaders ?? toRawHeaders(headers ?? {});
+        const rawHeaders = Array.isArray(controller?.rawHeaders) ? controller.rawHeaders : toRawHeaders(controller?.rawHeaders ?? headers ?? {});
         this.#handler.onUpgrade?.(statusCode, rawHeaders, socket);
       }
       onResponseStart(controller, statusCode, headers, statusMessage) {
-        const rawHeaders = controller?.rawHeaders ?? toRawHeaders(headers ?? {});
+        const rawHeaders = Array.isArray(controller?.rawHeaders) ? controller.rawHeaders : toRawHeaders(controller?.rawHeaders ?? headers ?? {});
         if (this.#handler.onHeaders?.(statusCode, rawHeaders, () => controller.resume(), statusMessage) === false) {
           controller.pause();
         }
@@ -41173,7 +44564,7 @@ var require_dispatcher1_wrapper = __commonJS({
         }
       }
       onResponseEnd(controller, trailers) {
-        const rawTrailers = controller?.rawTrailers ?? toRawHeaders(trailers ?? {});
+        const rawTrailers = Array.isArray(controller?.rawTrailers) ? controller.rawTrailers : toRawHeaders(controller?.rawTrailers ?? trailers ?? {});
         this.#handler.onComplete?.(rawTrailers);
       }
       onResponseError(_controller, err) {
@@ -41200,6 +44591,8 @@ var require_dispatcher1_wrapper = __commonJS({
           throw new InvalidArgumentError("Argument dispatcher must implement dispatch");
         }
         this.#dispatcher = dispatcher;
+        this[kUrl] = dispatcher[kUrl];
+        this[kOriginless] = dispatcher[kOriginless];
       }
       static wrapHandler(handler) {
         if (!handler || typeof handler !== "object") {
@@ -41215,6 +44608,15 @@ var require_dispatcher1_wrapper = __commonJS({
           opts = { ...opts, allowH2: false };
         }
         return this.#dispatcher.dispatch(opts, _Dispatcher1Wrapper.wrapHandler(handler));
+      }
+      // Older undici versions read WebSocket and EventSource receive limits from
+      // the (legacy) global dispatcher, which is this wrapper, so report the
+      // wrapped dispatcher's settings.
+      get webSocketOptions() {
+        return this.#dispatcher.webSocketOptions;
+      }
+      get eventSourceOptions() {
+        return this.#dispatcher.eventSourceOptions;
       }
       close(...args) {
         return this.#dispatcher.close(...args);
@@ -41728,24 +45130,33 @@ var require_socks5_proxy_agent = __commonJS({
     var { URL: URL2 } = require("node:url");
     var tls;
     var DispatcherBase = require_dispatcher_base2();
-    var { InvalidArgumentError } = require_errors2();
+    var { ConnectTimeoutError, InvalidArgumentError } = require_errors2();
     var { Socks5Client, STATES } = require_socks5_client();
     var { kBusy, kConnected, kDispatch, kClose, kDestroy } = require_symbols6();
     var Pool = require_pool2();
     var buildConnector = require_connect2();
+    var { setupConnectTimeout } = require_util9();
     var { debuglog } = require("node:util");
     var debug2 = debuglog("undici:socks5-proxy");
+    var DEFAULT_SOCKS5_CONNECT_TIMEOUT = 5e3;
     var kProxyUrl = /* @__PURE__ */ Symbol("proxy url");
     var kProxyHeaders = /* @__PURE__ */ Symbol("proxy headers");
     var kProxyAuth = /* @__PURE__ */ Symbol("proxy auth");
     var kProxyProtocol = /* @__PURE__ */ Symbol("proxy protocol");
     var kPools = /* @__PURE__ */ Symbol("pools");
     var kConnector = /* @__PURE__ */ Symbol("connector");
+    var kConnectTimeout = /* @__PURE__ */ Symbol("connect timeout");
     var kRequestTls = /* @__PURE__ */ Symbol("request tls settings");
+    var kRequestTlsTimeout = /* @__PURE__ */ Symbol("request tls timeout");
+    function createConnectTimeoutError(hostname, port, timeout) {
+      return new ConnectTimeoutError(
+        `Connect Timeout Error (attempted address: ${hostname}:${port}, timeout: ${timeout}ms)`
+      );
+    }
     var experimentalWarningEmitted = false;
     var Socks5ProxyAgent = class extends DispatcherBase {
       constructor(proxyUrl, options = {}) {
-        super();
+        super(options);
         if (!experimentalWarningEmitted) {
           process.emitWarning(
             "SOCKS5 proxy support is experimental and subject to change",
@@ -41763,13 +45174,29 @@ var require_socks5_proxy_agent = __commonJS({
         this[kProxyUrl] = url2;
         this[kProxyHeaders] = options.headers || {};
         this[kProxyProtocol] = options.proxyTls ? "https:" : "http:";
-        this[kRequestTls] = options.requestTls;
+        const connectTimeout = options.connectTimeout ?? DEFAULT_SOCKS5_CONNECT_TIMEOUT;
+        if (!Number.isFinite(connectTimeout) || connectTimeout < 0) {
+          throw new InvalidArgumentError("invalid connectTimeout");
+        }
+        this[kConnectTimeout] = connectTimeout;
+        const { timeout, ...requestTls } = options.requestTls || {};
+        const requestTlsTimeout = timeout ?? connectTimeout;
+        if (!Number.isFinite(requestTlsTimeout) || requestTlsTimeout < 0) {
+          throw new InvalidArgumentError("invalid requestTls.timeout");
+        }
+        this[kRequestTls] = requestTls;
+        this[kRequestTlsTimeout] = requestTlsTimeout;
         this[kProxyAuth] = {
           username: options.username || (url2.username ? decodeURIComponent(url2.username) : null),
           password: options.password || (url2.password ? decodeURIComponent(url2.password) : null)
         };
+        const proxyTlsTimeout = options.proxyTls?.timeout ?? connectTimeout;
+        if (!Number.isFinite(proxyTlsTimeout) || proxyTlsTimeout < 0) {
+          throw new InvalidArgumentError("invalid proxyTls.timeout");
+        }
         this[kConnector] = options.connect || buildConnector({
           ...options.proxyTls,
+          timeout: proxyTlsTimeout,
           servername: options.proxyTls?.servername || url2.hostname
         });
         this[kPools] = /* @__PURE__ */ new Map();
@@ -41802,17 +45229,24 @@ var require_socks5_proxy_agent = __commonJS({
         });
         await socks5Client.handshake();
         const authenticationReady = Promise.withResolvers();
-        const authenticationTimeout = setTimeout(() => {
-          authenticationReady.reject(new Error("SOCKS5 authentication timeout"));
-        }, 5e3);
-        const onAuthenticated = () => {
+        const authenticationTimeout = this[kConnectTimeout] === 0 ? null : setTimeout(() => {
+          cleanupAuthenticationListeners();
+          socks5Client.destroy();
+          authenticationReady.reject(
+            createConnectTimeoutError(proxyHost, proxyPort, this[kConnectTimeout])
+          );
+        }, this[kConnectTimeout]);
+        const cleanupAuthenticationListeners = () => {
           clearTimeout(authenticationTimeout);
+          socks5Client.removeListener("authenticated", onAuthenticated);
           socks5Client.removeListener("error", onAuthenticationError);
+        };
+        const onAuthenticated = () => {
+          cleanupAuthenticationListeners();
           authenticationReady.resolve();
         };
         const onAuthenticationError = (err) => {
-          clearTimeout(authenticationTimeout);
-          socks5Client.removeListener("authenticated", onAuthenticated);
+          cleanupAuthenticationListeners();
           authenticationReady.reject(err);
         };
         if (socks5Client.state === STATES.AUTHENTICATED) {
@@ -41825,18 +45259,25 @@ var require_socks5_proxy_agent = __commonJS({
         await authenticationReady.promise;
         await socks5Client.connect(targetHost, targetPort);
         const connectionReady = Promise.withResolvers();
-        const connectionTimeout = setTimeout(() => {
-          connectionReady.reject(new Error("SOCKS5 connection timeout"));
-        }, 5e3);
+        const connectionTimeout = this[kConnectTimeout] === 0 ? null : setTimeout(() => {
+          cleanupConnectionListeners();
+          socks5Client.destroy();
+          connectionReady.reject(
+            createConnectTimeoutError(targetHost, targetPort, this[kConnectTimeout])
+          );
+        }, this[kConnectTimeout]);
+        const cleanupConnectionListeners = () => {
+          clearTimeout(connectionTimeout);
+          socks5Client.removeListener("connected", onConnected);
+          socks5Client.removeListener("error", onConnectionError);
+        };
         const onConnected = (info2) => {
           debug2("SOCKS5 tunnel established to", targetHost, targetPort, "via", info2);
-          clearTimeout(connectionTimeout);
-          socks5Client.removeListener("error", onConnectionError);
+          cleanupConnectionListeners();
           connectionReady.resolve();
         };
         const onConnectionError = (err) => {
-          clearTimeout(connectionTimeout);
-          socks5Client.removeListener("connected", onConnected);
+          cleanupConnectionListeners();
           connectionReady.reject(err);
         };
         socks5Client.once("connected", onConnected);
@@ -41876,8 +45317,26 @@ var require_socks5_proxy_agent = __commonJS({
                       servername: this[kRequestTls]?.servername || targetHost
                     });
                     const tlsReady = Promise.withResolvers();
-                    finalSocket.once("secureConnect", tlsReady.resolve);
-                    finalSocket.once("error", tlsReady.reject);
+                    const cleanupTlsListeners = () => {
+                      queueMicrotask(clearTlsTimeout);
+                      finalSocket.removeListener("secureConnect", onSecureConnect);
+                      finalSocket.removeListener("error", onTlsError);
+                    };
+                    const onSecureConnect = () => {
+                      cleanupTlsListeners();
+                      tlsReady.resolve();
+                    };
+                    const onTlsError = (err) => {
+                      cleanupTlsListeners();
+                      tlsReady.reject(err);
+                    };
+                    const clearTlsTimeout = setupConnectTimeout(new WeakRef(finalSocket), {
+                      timeout: this[kRequestTlsTimeout],
+                      hostname: targetHost,
+                      port: targetPort
+                    });
+                    finalSocket.once("secureConnect", onSecureConnect);
+                    finalSocket.once("error", onTlsError);
                     await tlsReady.promise;
                   }
                   callback(null, finalSocket);
@@ -41948,6 +45407,7 @@ var require_proxy_agent2 = __commonJS({
     var Client = require_client2();
     var { channels } = require_diagnostics2();
     var Socks5ProxyAgent = require_socks5_proxy_agent();
+    var { hasSafeIterator } = require_util9();
     var kAgent = /* @__PURE__ */ Symbol("proxy agent");
     var kClient = /* @__PURE__ */ Symbol("proxy client");
     var kProxyHeaders = /* @__PURE__ */ Symbol("proxy headers");
@@ -42007,11 +45467,10 @@ var require_proxy_agent2 = __commonJS({
           headers = {}
         } = opts;
         opts.path = origin2 + path5;
-        if (!("host" in headers) && !("Host" in headers)) {
-          const { host } = new URL(origin2);
-          headers.host = host;
-        }
         opts.headers = { ...this[kProxyHeaders], ...headers };
+        if (!hasHostHeader(headers)) {
+          opts.headers.host = new URL(origin2).host;
+        }
         if (this.#proxyServername != null) {
           opts.servername = this.#proxyServername;
         }
@@ -42034,7 +45493,7 @@ var require_proxy_agent2 = __commonJS({
           throw new InvalidArgumentError("Proxy opts.clientFactory must be a function.");
         }
         const { proxyTunnel, connectTimeout } = opts;
-        super();
+        super(opts);
         const url2 = this.#getUrl(opts);
         const { href, origin: origin2, port, protocol, username, password, hostname: proxyHostname } = url2;
         this[kProxy] = { uri: href, protocol };
@@ -42067,6 +45526,7 @@ var require_proxy_agent2 = __commonJS({
               factory: agentFactory,
               username: opts.username || username,
               password: opts.password || password,
+              connectTimeout,
               proxyTls: opts.proxyTls,
               requestTls: opts.requestTls
             });
@@ -42155,11 +45615,13 @@ var require_proxy_agent2 = __commonJS({
         });
       }
       dispatch(opts, handler) {
-        const headers = buildHeaders(opts.headers);
+        let headers = buildHeaders(opts.headers);
         throwIfProxyAuthIsSent(headers);
-        if (headers && !("host" in headers) && !("Host" in headers)) {
-          const { host } = new URL(opts.origin);
-          headers.host = host;
+        if (headers && !hasHostHeader(headers)) {
+          if (headers === opts.headers) {
+            headers = { ...headers };
+          }
+          headers.host = new URL(opts.origin).host;
         }
         return this[kAgent].dispatch(
           {
@@ -42208,6 +45670,25 @@ var require_proxy_agent2 = __commonJS({
         }
         return headersPair;
       }
+      if (headers && typeof headers === "object" && hasSafeIterator(headers)) {
+        const headersPair = {};
+        for (const [key, value] of headers) {
+          if (!Object.hasOwn(headersPair, key)) {
+            headersPair[key] = value;
+            continue;
+          }
+          const previous = headersPair[key];
+          const values = [];
+          if (previous !== void 0) {
+            values.push(...Array.isArray(previous) ? previous : [previous]);
+          }
+          if (value !== void 0) {
+            values.push(...Array.isArray(value) ? value : [value]);
+          }
+          headersPair[key] = values.length > 1 ? values : values[0];
+        }
+        return headersPair;
+      }
       return headers;
     }
     function throwIfProxyAuthIsSent(headers) {
@@ -42219,6 +45700,14 @@ var require_proxy_agent2 = __commonJS({
     }
     function isProxyAuthorizationHeader(key) {
       return key.length === proxyAuthorization.length && key.toLowerCase() === proxyAuthorization;
+    }
+    function hasHostHeader(headers) {
+      for (const key in headers) {
+        if (key.length === 4 && key.toLowerCase() === "host") {
+          return true;
+        }
+      }
+      return false;
     }
     function throwProxyAuthError() {
       throw new InvalidArgumentError("Proxy-Authorization should be sent in ProxyAgent constructor");
@@ -42244,7 +45733,7 @@ var require_env_http_proxy_agent2 = __commonJS({
       #noProxyEntries = null;
       #opts = null;
       constructor(opts = {}) {
-        super();
+        super(opts);
         this.#opts = opts;
         const { httpProxy, httpsProxy, noProxy, ...agentOpts } = opts;
         this[kNoProxyAgent] = new Agent2(agentOpts);
@@ -42284,6 +45773,9 @@ var require_env_http_proxy_agent2 = __commonJS({
       #getProxyAgentForUrl(url2) {
         let { protocol, host: hostname, port } = url2;
         hostname = hostname.replace(/:\d*$/, "").replace(/^\[(.+)\]$/, "$1").toLowerCase();
+        if (hostname.length > 1 && hostname.charCodeAt(hostname.length - 1) === 46) {
+          hostname = hostname.slice(0, -1);
+        }
         port = Number.parseInt(port, 10) || DEFAULT_PORTS3[protocol] || 0;
         if (!this.#shouldProxy(hostname, port)) {
           return this[kNoProxyAgent];
@@ -42300,15 +45792,18 @@ var require_env_http_proxy_agent2 = __commonJS({
         if (this.#noProxyEntries.length === 0) {
           return true;
         }
-        if (this.#noProxyValue === "*") {
-          return false;
-        }
         for (let i = 0; i < this.#noProxyEntries.length; i++) {
           const entry = this.#noProxyEntries[i];
+          if (entry.hostname === "*") {
+            if (entry.port && entry.port !== port) {
+              continue;
+            }
+            return false;
+          }
           if (entry.port && entry.port !== port) {
             continue;
           }
-          if (hostname === entry.hostname) {
+          if (!entry.wildcard && hostname === entry.hostname) {
             return false;
           }
           if (hostname.slice(-(entry.hostname.length + 1)) === `.${entry.hostname}`) {
@@ -42338,10 +45833,12 @@ var require_env_http_proxy_agent2 = __commonJS({
             hostname = parsed ? parsed[1] : unbracketed;
             port = parsed ? Number.parseInt(parsed[2], 10) : 0;
           }
+          const wildcard = entry.charCodeAt(0) === 42;
           noProxyEntries.push({
-            // strip leading dot or asterisk with dot
-            hostname: hostname.replace(/^\*?\./, "").toLowerCase(),
-            port
+            // strip leading dot or asterisk with dot, and any trailing dot
+            hostname: hostname.replace(/^\*?\./, "").replace(/^(.+)\.$/, "$1").toLowerCase(),
+            port,
+            wildcard
           });
         }
         this.#noProxyValue = noProxyValue;
@@ -42367,8 +45864,9 @@ var require_retry_handler2 = __commonJS({
     "use strict";
     var assert = require("node:assert");
     var { kRetryHandlerDefaultRetry } = require_symbols6();
-    var { RequestRetryError } = require_errors2();
+    var { RequestRetryError, RequestAbortedError } = require_errors2();
     var {
+      hasSafeIterator,
       isDisturbed,
       parseRangeHeader,
       wrapRequestBody
@@ -42395,32 +45893,57 @@ var require_retry_handler2 = __commonJS({
       }
     }
     var RetryController = class {
-      constructor() {
-        this.target = null;
+      #onAbort;
+      #paused = false;
+      #target = null;
+      constructor(onAbort) {
+        this.#onAbort = onAbort;
+      }
+      set target(target) {
+        this.#target = target;
+        if (this.#paused) {
+          target?.pause();
+        }
+      }
+      get target() {
+        return this.#target;
       }
       pause() {
-        this.target?.pause();
+        this.#paused = true;
+        this.#target?.pause();
       }
       resume() {
-        this.target?.resume();
+        this.#paused = false;
+        this.#target?.resume();
       }
       abort(reason) {
-        this.target?.abort(reason);
+        this.#target?.abort(reason);
+        this.#onAbort(reason);
       }
       get paused() {
-        return this.target?.paused ?? false;
+        return this.#paused || (this.#target?.paused ?? false);
       }
       get aborted() {
-        return this.target?.aborted ?? false;
+        return this.#target?.aborted ?? false;
       }
       get reason() {
-        return this.target?.reason ?? null;
+        return this.#target?.reason ?? null;
       }
       get rawHeaders() {
-        return this.target?.rawHeaders ?? null;
+        return this.#target?.rawHeaders ?? null;
+      }
+      set rawHeaders(value) {
+        if (this.#target) {
+          this.#target.rawHeaders = value;
+        }
       }
       get rawTrailers() {
-        return this.target?.rawTrailers ?? null;
+        return this.#target?.rawTrailers ?? null;
+      }
+      set rawTrailers(value) {
+        if (this.#target) {
+          this.#target.rawTrailers = value;
+        }
       }
     };
     var RetryHandler = class _RetryHandler {
@@ -42479,13 +46002,24 @@ var require_retry_handler2 = __commonJS({
         this.etag = null;
         this.statusCode = null;
         this.headers = null;
-        this.controllerProxy = new RetryController();
+        this.controllerProxy = new RetryController((reason) => this.#onAbort(reason));
+        this.retryPending = false;
+        this.retryTimer = null;
+        this.pendingResponseData = null;
+        this.pendingResponseTrailers = null;
+        this.pendingResponseEnded = false;
+        this.aborted = false;
       }
       onResponseStartWithRetry(controller, statusCode, headers, statusMessage, err) {
         if (this.retryOpts.throwOnError) {
           if (this.retryOpts.statusCodes.includes(statusCode) === false) {
-            this.headersSent = true;
-            this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
+            if (this.headersSent) {
+              this.handler.onResponseError?.(this.controllerProxy, err);
+            } else {
+              this.headersSent = true;
+              this.checkpointResponseEnd(headers);
+              this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
+            }
           } else {
             this.error = err;
           }
@@ -42493,34 +46027,83 @@ var require_retry_handler2 = __commonJS({
         }
         if (isDisturbed(this.opts.body)) {
           this.headersSent = true;
+          this.checkpointResponseEnd(headers);
           this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
           return;
         }
         function shouldRetry(passedErr) {
+          if (this.aborted) {
+            return;
+          }
+          this.retryPending = false;
+          this.retryTimer = null;
+          const pendingData = this.pendingResponseData;
+          const pendingTrailers = this.pendingResponseTrailers;
+          const pendingEnd = this.pendingResponseEnded;
+          this.pendingResponseData = null;
+          this.pendingResponseTrailers = null;
+          this.pendingResponseEnded = false;
           if (passedErr) {
-            this.headersSent = true;
-            this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
+            if (this.headersSent) {
+              this.handler.onResponseError?.(this.controllerProxy, passedErr);
+            } else {
+              this.headersSent = true;
+              this.checkpointResponseEnd(headers);
+              this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
+              controller.resume();
+              if (pendingEnd) {
+                for (const chunk of pendingData) {
+                  this.onResponseData(controller, chunk);
+                }
+                this.onResponseEnd(controller, pendingTrailers);
+              }
+              return;
+            }
             controller.resume();
             return;
           }
           this.error = err;
           controller.resume();
+          if (pendingEnd) {
+            this.onResponseEnd(controller, pendingTrailers);
+          }
         }
         controller.pause();
-        this.retryOpts.retry(
+        this.retryPending = true;
+        this.pendingResponseData = [];
+        this.pendingResponseTrailers = null;
+        this.pendingResponseEnded = false;
+        this.retryTimer = this.retryOpts.retry(
           err,
           {
             state: { counter: this.retryCount },
             opts: { retryOptions: this.retryOpts, ...this.opts }
           },
           shouldRetry.bind(this)
-        );
+        ) ?? null;
+      }
+      checkpointResponseEnd(headers) {
+        if (this.end == null && this.opts.method !== "HEAD") {
+          const contentLength = headers["content-length"];
+          this.end = contentLength != null ? Number(contentLength) - 1 : null;
+          assert(
+            this.end == null || Number.isFinite(this.end),
+            "invalid content-length"
+          );
+          this.resume = this.end != null;
+        }
       }
       onRequestStart(controller, context) {
         this.controllerProxy.target = controller;
         if (!this.headersSent) {
           this.handler.onRequestStart?.(this.controllerProxy, context);
         }
+      }
+      onBodySent(chunk) {
+        this.handler.onBodySent?.(chunk);
+      }
+      onRequestSent() {
+        this.handler.onRequestSent?.();
       }
       onRequestUpgrade(_controller, statusCode, headers, socket) {
         this.handler.onRequestUpgrade?.(this.controllerProxy, statusCode, headers, socket);
@@ -42535,7 +46118,8 @@ var require_retry_handler2 = __commonJS({
           timeoutFactor,
           statusCodes,
           errorCodes,
-          methods
+          methods,
+          retryAfter
         } = retryOptions;
         const { counter } = state;
         if (code && code !== "UND_ERR_REQ_RETRY" && !errorCodes.includes(code)) {
@@ -42554,13 +46138,13 @@ var require_retry_handler2 = __commonJS({
           cb(err);
           return;
         }
-        let retryAfterHeader = headers?.["retry-after"];
+        let retryAfterHeader = retryAfter === false ? void 0 : headers?.["retry-after"];
         if (retryAfterHeader) {
           retryAfterHeader = Number(retryAfterHeader);
           retryAfterHeader = Number.isNaN(retryAfterHeader) ? calculateRetryAfterHeader(headers["retry-after"]) : retryAfterHeader * 1e3;
         }
         const retryTimeout = retryAfterHeader === 0 ? 0 : retryAfterHeader > 0 ? Math.min(retryAfterHeader, maxTimeout) : Math.min(minTimeout * timeoutFactor ** (counter - 1), maxTimeout);
-        setTimeout(() => cb(null), retryTimeout);
+        return setTimeout(() => cb(null), retryTimeout);
       }
       onResponseStart(controller, statusCode, headers, statusMessage) {
         if (statusCode < 200) {
@@ -42571,16 +46155,6 @@ var require_retry_handler2 = __commonJS({
         this.retryCount += 1;
         this.statusCode = statusCode;
         this.headers = headers;
-        if (statusCode >= 300) {
-          const err = new RequestRetryError("Request failed", statusCode, {
-            headers,
-            data: {
-              count: this.retryCount
-            }
-          });
-          this.onResponseStartWithRetry(controller, statusCode, headers, statusMessage, err);
-          return;
-        }
         if (this.headersSent) {
           if (statusCode !== 206 && (this.start > 0 || statusCode !== 200)) {
             throw new RequestRetryError("server does not support the range header and the payload was partially consumed", statusCode, {
@@ -42603,8 +46177,22 @@ var require_retry_handler2 = __commonJS({
           }
           validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount);
           const { start, size, end = size ? size - 1 : null } = contentRange;
-          assert(this.start === start, "content-range mismatch");
-          assert(this.end == null || this.end === end, "content-range mismatch");
+          if (this.start !== start || this.end != null && this.end !== end) {
+            throw new RequestRetryError("Content-Range mismatch", statusCode, {
+              headers,
+              data: { count: this.retryCount }
+            });
+          }
+          return;
+        }
+        if (statusCode >= 300) {
+          const err = new RequestRetryError("Request failed", statusCode, {
+            headers,
+            data: {
+              count: this.retryCount
+            }
+          });
+          this.onResponseStartWithRetry(controller, statusCode, headers, statusMessage, err);
           return;
         }
         if (this.end == null) {
@@ -42659,6 +46247,10 @@ var require_retry_handler2 = __commonJS({
         }
       }
       onResponseData(_controller, chunk) {
+        if (this.pendingResponseData !== null) {
+          this.pendingResponseData.push(chunk);
+          return;
+        }
         if (this.error) {
           return;
         }
@@ -42666,6 +46258,11 @@ var require_retry_handler2 = __commonJS({
         this.handler.onResponseData?.(this.controllerProxy, chunk);
       }
       onResponseEnd(_controller, trailers) {
+        if (this.pendingResponseData !== null) {
+          this.pendingResponseTrailers = trailers;
+          this.pendingResponseEnded = true;
+          return;
+        }
         if (this.error && this.retryOpts.throwOnError) {
           throw this.error;
         }
@@ -42685,16 +46282,9 @@ var require_retry_handler2 = __commonJS({
       }
       retry() {
         if (this.start !== 0) {
-          const headers = { range: `bytes=${this.start}-${this.end ?? ""}` };
-          if (this.etag != null) {
-            headers["if-match"] = this.etag;
-          }
           this.opts = {
             ...this.opts,
-            headers: {
-              ...this.opts.headers,
-              ...headers
-            }
+            headers: buildResumeHeaders(this.opts.headers, `bytes=${this.start}-${this.end ?? ""}`, this.etag)
           };
         }
         try {
@@ -42705,11 +46295,19 @@ var require_retry_handler2 = __commonJS({
         }
       }
       onResponseError(controller, err) {
-        if (controller?.aborted || isDisturbed(this.opts.body)) {
+        if (this.aborted) {
+          return;
+        }
+        if (controller?.aborted || isDisturbed(this.opts.body) || this.headersSent && !this.resume) {
           this.handler.onResponseError?.(this.controllerProxy, err);
           return;
         }
         function shouldRetry(returnedErr) {
+          if (this.aborted) {
+            return;
+          }
+          this.retryPending = false;
+          this.retryTimer = null;
           if (!returnedErr) {
             this.retry();
             return;
@@ -42721,16 +46319,68 @@ var require_retry_handler2 = __commonJS({
         } else {
           this.retryCount += 1;
         }
-        this.retryOpts.retry(
+        this.retryPending = true;
+        this.retryTimer = this.retryOpts.retry(
           err,
           {
             state: { counter: this.retryCount },
             opts: { retryOptions: this.retryOpts, ...this.opts }
           },
           shouldRetry.bind(this)
-        );
+        ) ?? null;
+      }
+      #onAbort(reason) {
+        if (!this.retryPending) {
+          return;
+        }
+        this.aborted = true;
+        this.retryPending = false;
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        this.pendingResponseData = null;
+        this.pendingResponseTrailers = null;
+        this.pendingResponseEnded = false;
+        this.handler.onResponseError?.(this.controllerProxy, reason ?? new RequestAbortedError());
       }
     };
+    function isReplacedHeader(key, etag) {
+      const name = key.toLowerCase();
+      return name === "range" || etag != null && name === "if-match";
+    }
+    function buildResumeHeaders(headers, range, etag) {
+      if (Array.isArray(headers) || headers && typeof headers === "object" && hasSafeIterator(headers)) {
+        const ret2 = [];
+        if (Array.isArray(headers)) {
+          for (let i = 0; i < headers.length; i += 2) {
+            if (!isReplacedHeader(headers[i], etag)) {
+              ret2.push(headers[i], headers[i + 1]);
+            }
+          }
+        } else {
+          for (const [key, value] of headers) {
+            if (!isReplacedHeader(key, etag)) {
+              ret2.push(key, value);
+            }
+          }
+        }
+        ret2.push("range", range);
+        if (etag != null) {
+          ret2.push("if-match", etag);
+        }
+        return ret2;
+      }
+      const ret = {};
+      for (const key in headers) {
+        if (Object.hasOwn(headers, key) && !isReplacedHeader(key, etag)) {
+          ret[key] = headers[key];
+        }
+      }
+      ret.range = range;
+      if (etag != null) {
+        ret["if-match"] = etag;
+      }
+      return ret;
+    }
     module2.exports = RetryHandler;
   }
 });
@@ -42741,6 +46391,7 @@ var require_retry_agent2 = __commonJS({
     "use strict";
     var Dispatcher = require_dispatcher2();
     var RetryHandler = require_retry_handler2();
+    var { kOriginless, kUrl } = require_symbols6();
     var RetryAgent = class extends Dispatcher {
       #agent = null;
       #options = null;
@@ -42748,6 +46399,8 @@ var require_retry_agent2 = __commonJS({
         super(options);
         this.#agent = agent;
         this.#options = options;
+        this[kUrl] = agent[kUrl];
+        this[kOriginless] = agent[kOriginless];
       }
       dispatch(opts, handler) {
         const retry = new RetryHandler({
@@ -42758,6 +46411,14 @@ var require_retry_agent2 = __commonJS({
           handler
         });
         return this.#agent.dispatch(opts, retry);
+      }
+      // WebSocket and EventSource read their receive limits from the dispatcher
+      // they are given, so report the wrapped agent's settings rather than none.
+      get webSocketOptions() {
+        return this.#agent.webSocketOptions;
+      }
+      get eventSourceOptions() {
+        return this.#agent.eventSourceOptions;
       }
       close() {
         return this.#agent.close();
@@ -42822,7 +46483,6 @@ var require_readable2 = __commonJS({
     var { Readable: Readable5 } = require("node:stream");
     var { RequestAbortedError, NotSupportedError, InvalidArgumentError, AbortError } = require_errors2();
     var util4 = require_util9();
-    var { ReadableStreamFrom } = require_util9();
     var kConsume = /* @__PURE__ */ Symbol("kConsume");
     var kReading = /* @__PURE__ */ Symbol("kReading");
     var kBody = /* @__PURE__ */ Symbol("kBody");
@@ -43009,7 +46669,7 @@ var require_readable2 = __commonJS({
        */
       get body() {
         if (!this[kBody]) {
-          this[kBody] = ReadableStreamFrom(this);
+          this[kBody] = ReadableStream.from(this);
           if (this[kConsume]) {
             this[kBody].getReader();
             assert(this[kBody].locked);
@@ -44419,8 +48079,7 @@ var require_mock_utils2 = __commonJS({
                 handler.onResponseError(null, new InvalidArgumentError("reply options callback must return an object"));
                 return;
               }
-              mockDispatch2.data = { ...responseDefaults, ...resolvedData };
-              dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler);
+              dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler, { ...responseDefaults, ...resolvedData });
             },
             (error2) => {
               handler.onResponseError(null, error2);
@@ -44431,12 +48090,13 @@ var require_mock_utils2 = __commonJS({
         if (callbackResult == null || typeof callbackResult !== "object") {
           throw new InvalidArgumentError("reply options callback must return an object");
         }
-        mockDispatch2.data = { ...responseDefaults, ...callbackResult };
+        return dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler, { ...responseDefaults, ...callbackResult });
       }
       return dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler);
     }
-    function dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler) {
-      const { data: response, delay } = mockDispatch2;
+    function dispatchMockReply(mockDispatches, mockDispatch2, key, opts, handler, resolvedResponse) {
+      const { data: responseData, delay } = mockDispatch2;
+      const response = resolvedResponse ?? responseData;
       if (response.error !== null) {
         deleteMockDispatch(mockDispatches, key);
         handler.onResponseError(null, response.error);
@@ -44510,8 +48170,7 @@ var require_mock_utils2 = __commonJS({
                   handler.onResponseError(null, new InvalidArgumentError("reply options callback must return an object"));
                   return;
                 }
-                mockDispatch2.data = { ...responseDefaults, ...resolvedData };
-                handleReply(dispatches, mockDispatch2.data);
+                handleReply(dispatches, { ...responseDefaults, ...resolvedData });
               },
               (err) => {
                 handler.onResponseError(null, err);
@@ -44522,8 +48181,7 @@ var require_mock_utils2 = __commonJS({
           if (callbackResult == null || typeof callbackResult !== "object") {
             throw new InvalidArgumentError("reply options callback must return an object");
           }
-          mockDispatch2.data = { ...responseDefaults, ...callbackResult };
-          handleReply(dispatches, mockDispatch2.data);
+          handleReply(dispatches, { ...responseDefaults, ...callbackResult });
           return;
         }
         if (typeof delay === "number" && delay > 0) {
@@ -44548,13 +48206,13 @@ var require_mock_utils2 = __commonJS({
         if (aborted) {
           return;
         }
-        const responseData = getResponseData(body);
+        const responseData2 = getResponseData(body);
         const responseHeaders = generateKeyValues(headers ?? {});
         const responseTrailers = generateKeyValues(trailers ?? {});
         controller.rawHeaders = responseHeaders;
         controller.rawTrailers = responseTrailers;
         handler.onResponseStart?.(controller, statusCode, parseHeaders(responseHeaders), getStatusText(statusCode));
-        handler.onResponseData?.(controller, Buffer.from(responseData));
+        handler.onResponseData?.(controller, Buffer.from(responseData2));
         handler.onResponseEnd?.(controller, parseHeaders(responseTrailers));
         deleteMockDispatch(mockDispatches2, key);
       }
@@ -45305,6 +48963,15 @@ var require_mock_agent2 = __commonJS({
           this[kMockAgentRegisterCallHistory]();
         }
       }
+      // WebSocket and EventSource read their receive limits from the dispatcher
+      // they are given, so report the settings of the agent that makes real
+      // connections.
+      get webSocketOptions() {
+        return this[kAgent].webSocketOptions;
+      }
+      get eventSourceOptions() {
+        return this[kAgent].eventSourceOptions;
+      }
       get(origin2) {
         const normalizedOrigin = normalizeOrigin(origin2);
         const originKey = this[kIgnoreTrailingSlash] ? normalizedOrigin.replace(/\/$/, "") : normalizedOrigin;
@@ -45317,10 +48984,18 @@ var require_mock_agent2 = __commonJS({
       }
       dispatch(opts, handler) {
         opts.origin = normalizeOrigin(opts.origin);
-        this.get(opts.origin);
+        const mockDispatcher = this.get(opts.origin);
         this[kMockAgentAddCallHistoryLog](opts);
         const acceptNonStandardSearchParameters = this[kMockAgentAcceptsNonStandardSearchParameters];
         const dispatchOpts = { ...opts };
+        if (dispatchOpts.allowH2 === false) {
+          const http1OnlyKey = `${dispatchOpts.origin}#http1-only`;
+          if (!this[kClients].has(http1OnlyKey)) {
+            const http1OnlyDispatcher = this[kFactory](dispatchOpts.origin);
+            http1OnlyDispatcher[kDispatches] = mockDispatcher[kDispatches];
+            this[kMockAgentSet](http1OnlyKey, http1OnlyDispatcher);
+          }
+        }
         if (acceptNonStandardSearchParameters && dispatchOpts.path) {
           const [path5, searchParams] = dispatchOpts.path.split("?");
           const normalizedSearchParams = normalizeSearchParams(searchParams, acceptNonStandardSearchParameters);
@@ -45443,6 +49118,7 @@ var require_snapshot_utils = __commonJS({
   "node_modules/undici/lib/mock/snapshot-utils.js"(exports2, module2) {
     "use strict";
     var { InvalidArgumentError } = require_errors2();
+    var { setHeader } = require_util9();
     var { runtimeFeatures } = require_runtime_features();
     function createHeaderFilters(matchOptions = {}) {
       const { ignoreHeaders = [], excludeHeaders = [], matchHeaders = [], caseSensitive = false } = matchOptions;
@@ -45490,7 +49166,7 @@ var require_snapshot_utils = __commonJS({
           if (key && value !== void 0) {
             const keyStr = Buffer.isBuffer(key) ? key.toString() : key;
             const valueStr = Buffer.isBuffer(value) ? value.toString() : value;
-            normalizedHeaders[keyStr.toLowerCase()] = valueStr;
+            setHeader(normalizedHeaders, keyStr.toLowerCase(), valueStr);
           }
         }
         return normalizedHeaders;
@@ -45498,7 +49174,7 @@ var require_snapshot_utils = __commonJS({
       if (headers && typeof headers === "object") {
         for (const [key, value] of Object.entries(headers)) {
           if (key && typeof key === "string") {
-            normalizedHeaders[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+            setHeader(normalizedHeaders, key.toLowerCase(), Array.isArray(value) ? value.join(", ") : String(value));
           }
         }
       }
@@ -45532,6 +49208,7 @@ var require_snapshot_recorder = __commonJS({
     var { dirname, resolve } = require("node:path");
     var { setTimeout: setTimeout2, clearTimeout: clearTimeout2 } = require("node:timers");
     var { InvalidArgumentError, UndiciError } = require_errors2();
+    var { setHeader } = require_util9();
     var { hashId, isUrlExcludedFactory, normalizeHeaders, createHeaderFilters } = require_snapshot_utils();
     function normalizeUrlForMatching(url2, matchQuery, normalizeQuery) {
       if (matchQuery === false) return `${url2.origin}${url2.pathname}`;
@@ -45573,7 +49250,7 @@ var require_snapshot_recorder = __commonJS({
         if (match.size !== 0) {
           if (!match.has(headerKey)) continue;
         }
-        filtered[headerKey] = value;
+        setHeader(filtered, headerKey, value);
       }
       return filtered;
     }
@@ -45587,7 +49264,7 @@ var require_snapshot_recorder = __commonJS({
       for (const [key, value] of Object.entries(headers)) {
         const headerKey = caseSensitive ? key : key.toLowerCase();
         if (excludeSet.has(headerKey)) continue;
-        filtered[headerKey] = value;
+        setHeader(filtered, headerKey, value);
       }
       return filtered;
     }
@@ -46334,7 +50011,11 @@ var require_decorator_handler2 = __commonJS({
       /**
        * @deprecated
        */
-      onBodySent() {
+      onBodySent(...args) {
+        return this.#handler.onBodySent?.(...args);
+      }
+      onRequestSent(...args) {
+        return this.#handler.onRequestSent?.(...args);
       }
     };
   }
@@ -46346,7 +50027,8 @@ var require_redirect_handler2 = __commonJS({
     "use strict";
     var util4 = require_util9();
     var assert = require("node:assert");
-    var { InvalidArgumentError } = require_errors2();
+    var { InvalidArgumentError, MaxRedirectsError } = require_errors2();
+    var { kRequestOrigin, kRedirectCacheControl } = require_symbols6();
     var redirectableStatusCodes = [300, 301, 302, 303, 307, 308];
     var noop2 = () => {
     };
@@ -46375,16 +50057,27 @@ var require_redirect_handler2 = __commonJS({
         this.maxRedirections = maxRedirections;
         this.handler = handler;
         this.history = [];
+        Object.defineProperty(this.history, kRedirectCacheControl, {
+          value: [],
+          enumerable: false
+        });
       }
       onRequestStart(controller, context) {
         this.handler.onRequestStart?.(controller, { ...context, history: this.history });
+      }
+      onBodySent(chunk) {
+        this.handler.onBodySent?.(chunk);
+      }
+      onRequestSent() {
+        this.handler.onRequestSent?.();
       }
       onRequestUpgrade(controller, statusCode, headers, socket) {
         this.handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
       }
       onResponseStart(controller, statusCode, headers, statusMessage) {
-        if (this.opts.throwOnMaxRedirect && this.history.length >= this.maxRedirections) {
-          throw new Error("max redirects");
+        if (statusCode < 200) {
+          this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+          return;
         }
         let removeContentHeaders = statusCode === 303;
         if ((statusCode === 301 || statusCode === 302) && this.opts.method === "POST") {
@@ -46402,15 +50095,24 @@ var require_redirect_handler2 = __commonJS({
           }
           this.opts.body = null;
         }
-        this.location = this.history.length >= this.maxRedirections || util4.isDisturbed(this.opts.body) || redirectableStatusCodes.indexOf(statusCode) === -1 ? null : headers.location;
-        if (this.opts.origin) {
-          this.history.push(new URL(this.opts.path, this.opts.origin));
+        this.location = util4.isDisturbed(this.opts.body) || redirectableStatusCodes.indexOf(statusCode) === -1 ? null : headers.location || null;
+        if (this.location && this.history.length >= this.maxRedirections) {
+          if (this.opts.throwOnMaxRedirect) {
+            throw new MaxRedirectsError();
+          }
+          this.location = null;
+        }
+        const requestOrigin = this.opts[kRequestOrigin] === void 0 ? this.opts.origin : this.opts[kRequestOrigin];
+        if (requestOrigin) {
+          this.history.push(new URL(this.opts.path, requestOrigin));
         }
         if (!this.location) {
           this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
           return;
         }
-        const { origin: origin2, pathname, search } = util4.parseURL(new URL(this.location, this.opts.origin && new URL(this.opts.path, this.opts.origin)));
+        this.history[kRedirectCacheControl].push(headers["cache-control"]);
+        const baseUrl = requestOrigin ? new URL(this.opts.path, requestOrigin) : void 0;
+        const { origin: origin2, pathname, search } = util4.parseURL(new URL(this.location, baseUrl));
         const path5 = search ? `${pathname}${search}` : pathname;
         const redirectUrlString = `${origin2}${path5}`;
         for (const historyUrl of this.history) {
@@ -46418,9 +50120,10 @@ var require_redirect_handler2 = __commonJS({
             throw new InvalidArgumentError(`Redirect loop detected. Cannot redirect to ${origin2}. This typically happens when using a Client or Pool with cross-origin redirects. Use an Agent for cross-origin redirects.`);
           }
         }
-        this.opts.headers = cleanRequestHeaders(this.opts.headers, removeContentHeaders, this.opts.origin !== origin2, this.stripHeadersOnRedirect, this.stripHeadersOnCrossOriginRedirect);
+        this.opts.headers = cleanRequestHeaders(this.opts.headers, removeContentHeaders, requestOrigin !== origin2, this.stripHeadersOnRedirect, this.stripHeadersOnCrossOriginRedirect);
         this.opts.path = path5;
         this.opts.origin = origin2;
+        this.opts[kRequestOrigin] = origin2;
         this.opts.query = null;
       }
       onResponseData(controller, chunk) {
@@ -46523,15 +50226,20 @@ var require_response_error = __commonJS({
   "node_modules/undici/lib/interceptor/response-error.js"(exports2, module2) {
     "use strict";
     var DecoratorHandler = require_decorator_handler2();
-    var { ResponseError } = require_errors2();
+    var { InvalidArgumentError, ResponseError } = require_errors2();
+    var defaultMaxSize = 1024 * 1024;
     var ResponseErrorHandler = class extends DecoratorHandler {
       #statusCode;
       #contentType;
       #decoder;
       #headers;
       #body;
-      constructor(_opts, { handler }) {
+      #bodySize;
+      #bodyTruncated;
+      #maxSize;
+      constructor({ maxSize }, { handler }) {
         super(handler);
+        this.#maxSize = maxSize;
       }
       #checkContentType(contentType) {
         return (this.#contentType ?? "").indexOf(contentType) === 0;
@@ -46542,6 +50250,8 @@ var require_response_error = __commonJS({
         this.#decoder = null;
         this.#headers = null;
         this.#body = "";
+        this.#bodySize = 0;
+        this.#bodyTruncated = false;
         return super.onRequestStart(controller, context);
       }
       onResponseStart(controller, statusCode, headers, statusMessage) {
@@ -46555,33 +50265,57 @@ var require_response_error = __commonJS({
           this.#decoder = new TextDecoder("utf-8");
         }
       }
+      #createResponseError() {
+        this.#body += this.#decoder?.decode(void 0, { stream: false }) ?? "";
+        this.#decoder = null;
+        if (!this.#bodyTruncated && this.#checkContentType("application/json")) {
+          try {
+            this.#body = JSON.parse(this.#body);
+          } catch {
+          }
+        }
+        let err;
+        const stackTraceLimit = Error.stackTraceLimit;
+        Error.stackTraceLimit = 0;
+        try {
+          err = new ResponseError("Response Error", this.#statusCode, {
+            body: this.#body,
+            bodyTruncated: this.#bodyTruncated,
+            headers: this.#headers
+          });
+        } finally {
+          Error.stackTraceLimit = stackTraceLimit;
+        }
+        return err;
+      }
       onResponseData(controller, chunk) {
         if (this.#statusCode < 400) {
           return super.onResponseData(controller, chunk);
         }
-        this.#body += this.#decoder?.decode(chunk, { stream: true }) ?? "";
+        if (this.#decoder == null) {
+          return;
+        }
+        if (this.#maxSize === 0) {
+          this.#body += this.#decoder.decode(chunk, { stream: true });
+          return;
+        }
+        const remaining = this.#maxSize - this.#bodySize;
+        if (chunk.length <= remaining) {
+          this.#bodySize += chunk.length;
+          this.#body += this.#decoder.decode(chunk, { stream: true });
+          return;
+        }
+        if (remaining > 0) {
+          this.#body += this.#decoder.decode(chunk.subarray(0, remaining), { stream: true });
+          this.#bodySize = this.#maxSize;
+        }
+        this.#bodyTruncated = true;
+        this.#body += this.#decoder.decode(void 0, { stream: false });
+        this.#decoder = null;
       }
       onResponseEnd(controller, trailers) {
         if (this.#statusCode >= 400) {
-          this.#body += this.#decoder?.decode(void 0, { stream: false }) ?? "";
-          if (this.#checkContentType("application/json")) {
-            try {
-              this.#body = JSON.parse(this.#body);
-            } catch {
-            }
-          }
-          let err;
-          const stackTraceLimit = Error.stackTraceLimit;
-          Error.stackTraceLimit = 0;
-          try {
-            err = new ResponseError("Response Error", this.#statusCode, {
-              body: this.#body,
-              headers: this.#headers
-            });
-          } finally {
-            Error.stackTraceLimit = stackTraceLimit;
-          }
-          super.onResponseError(controller, err);
+          super.onResponseError(controller, this.#createResponseError());
         } else {
           super.onResponseEnd(controller, trailers);
         }
@@ -46590,10 +50324,14 @@ var require_response_error = __commonJS({
         super.onResponseError(controller, err);
       }
     };
-    module2.exports = () => {
+    module2.exports = (opts = {}) => {
+      const { maxSize = defaultMaxSize } = opts;
+      if (!Number.isSafeInteger(maxSize) || maxSize < 0) {
+        throw new InvalidArgumentError("maxSize must be a non-negative integer");
+      }
       return (dispatch) => {
-        return function Intercept(opts, handler) {
-          return dispatch(opts, new ResponseErrorHandler(opts, { handler }));
+        return function Intercept(opts2, handler) {
+          return dispatch(opts2, new ResponseErrorHandler({ maxSize }, { handler }));
         };
       };
     };
@@ -46634,7 +50372,6 @@ var require_dump2 = __commonJS({
       #maxSize = 1024 * 1024;
       #dumped = false;
       #size = 0;
-      #controller = null;
       aborted = false;
       reason = false;
       constructor({ maxSize, signal }, handler) {
@@ -46650,7 +50387,6 @@ var require_dump2 = __commonJS({
       }
       onRequestStart(controller, context) {
         controller.abort = this.#abort.bind(this);
-        this.#controller = controller;
         return super.onRequestStart(controller, context);
       }
       onResponseStart(controller, statusCode, headers, statusMessage) {
@@ -46666,33 +50402,26 @@ var require_dump2 = __commonJS({
         return super.onResponseStart(controller, statusCode, headers, statusMessage);
       }
       onResponseError(controller, err) {
-        if (this.#dumped) {
-          return;
-        }
-        err = this.#controller?.reason ?? err;
-        super.onResponseError(controller, err);
+        super.onResponseError(controller, this.aborted === true ? this.reason : err);
       }
       onResponseData(controller, chunk) {
         this.#size = this.#size + chunk.length;
-        if (this.#size >= this.#maxSize) {
+        if (this.#size > this.#maxSize) {
+          throw new RequestAbortedError(
+            `Response size (${this.#size}) larger than maxSize (${this.#maxSize})`
+          );
+        }
+        if (this.#size === this.#maxSize) {
           this.#dumped = true;
-          if (this.aborted === true) {
-            super.onResponseError(controller, this.reason);
-          } else {
-            super.onResponseEnd(controller, {});
-          }
         }
         return true;
       }
       onResponseEnd(controller, trailers) {
-        if (this.#dumped) {
-          return;
-        }
-        if (this.#controller.aborted === true) {
+        if (this.aborted === true) {
           super.onResponseError(controller, this.reason);
           return;
         }
-        super.onResponseEnd(controller, trailers);
+        super.onResponseEnd(controller, this.#dumped ? {} : trailers);
       }
     };
     function createDumpInterceptor({ maxSize: defaultMaxSize } = {
@@ -46718,6 +50447,7 @@ var require_dns2 = __commonJS({
     var { lookup } = require("node:dns");
     var DecoratorHandler = require_decorator_handler2();
     var { InvalidArgumentError, InformationalError } = require_errors2();
+    var { kRequestOrigin } = require_symbols6();
     var maxInt = Math.pow(2, 31) - 1;
     function hasSafeIterator(headers) {
       const prototype2 = Object.getPrototypeOf(headers);
@@ -46866,6 +50596,11 @@ var require_dns2 = __commonJS({
               records,
               newOpts.affinity
             );
+            if (ip == null) {
+              this.storage.delete(origin2.hostname);
+              cb(new InformationalError("No DNS entries found"));
+              return;
+            }
             let port;
             if (typeof ip.port === "number") {
               port = `:${ip.port}`;
@@ -46986,6 +50721,7 @@ var require_dns2 = __commonJS({
         }
         if (Date.now() - ip.timestamp > ip.ttl) {
           family.ips.splice(position, 1);
+          return this.pickFamily(origin2, ipFamily);
         }
         return ip;
       }
@@ -47057,6 +50793,7 @@ var require_dns2 = __commonJS({
               const dispatchOpts = {
                 ...this.#opts,
                 origin: `${this.#origin.protocol}//${ip.family === 6 ? `[${ip.address}]` : ip.address}${port}`,
+                [kRequestOrigin]: this.#opts[kRequestOrigin] === void 0 ? this.#origin : this.#opts[kRequestOrigin],
                 headers: withHostHeader(this.#origin.host, this.#opts.headers)
               };
               this.#dispatch(dispatchOpts, this);
@@ -47135,6 +50872,7 @@ var require_dns2 = __commonJS({
               servername: origin2.hostname,
               // For SNI on TLS
               origin: newOrigin.origin,
+              [kRequestOrigin]: origDispatchOpts[kRequestOrigin] === void 0 ? origin2 : origDispatchOpts[kRequestOrigin],
               headers: withHostHeader(origin2.host, origDispatchOpts.headers)
             };
             dispatch(
@@ -47160,9 +50898,11 @@ var require_cache2 = __commonJS({
       safeHTTPMethods,
       pathHasQueryOrFragment,
       hasSafeIterator,
-      isValidHTTPToken
+      isValidHTTPToken,
+      setHeader
     } = require_util9();
     var { serializePathWithQuery } = require_util9();
+    var { kRequestOrigin } = require_symbols6();
     var MAX_DELTA_SECONDS = 2147483647;
     var RESTRICTIVE_DIRECTIVE_NAMES = ["no-store", "private", "no-cache"];
     var kInvalidCacheControlDirectives = /* @__PURE__ */ Symbol("invalid cache-control directives");
@@ -47274,14 +51014,39 @@ var require_cache2 = __commonJS({
         return tokenOnlyKey;
       }
     }
-    function makeCacheKey(opts) {
-      const origin2 = opts.origin ? opts.origin.toString() : "";
+    function getRequestOrigin(opts) {
+      const origin2 = opts[kRequestOrigin] === void 0 ? opts.origin : opts[kRequestOrigin];
+      return typeof origin2 === "string" || origin2 instanceof URL ? origin2 : null;
+    }
+    function getInterceptorOrigin(opts, interceptorOrigin) {
+      const requestOrigin = getRequestOrigin(opts);
+      if (interceptorOrigin === void 0) {
+        return requestOrigin;
+      }
+      if (interceptorOrigin === null) {
+        return null;
+      }
+      if (requestOrigin) {
+        try {
+          if (new URL(requestOrigin).origin !== interceptorOrigin) {
+            return null;
+          }
+        } catch {
+          return interceptorOrigin;
+        }
+      }
+      return interceptorOrigin;
+    }
+    function makeCacheKey(opts, origin2 = getRequestOrigin(opts)) {
+      if (!origin2) {
+        throw new Error("opts.origin is undefined");
+      }
       let fullPath = opts.path || "/";
       if (opts.query && !pathHasQueryOrFragment(fullPath)) {
         fullPath = serializePathWithQuery(fullPath, opts.query);
       }
       return {
-        origin: origin2,
+        origin: origin2.toString(),
         method: opts.method,
         path: fullPath,
         headers: opts.headers
@@ -47289,14 +51054,14 @@ var require_cache2 = __commonJS({
     }
     function appendHeader(headers, key, val) {
       const headerName = key.toLowerCase();
-      const current = headers[headerName];
+      const current = Object.hasOwn(headers, headerName) ? headers[headerName] : void 0;
       const values = Array.isArray(val) ? val : [val];
       if (current === void 0) {
-        headers[headerName] = Array.isArray(val) ? val.slice() : val;
+        setHeader(headers, headerName, Array.isArray(val) ? val.slice() : val);
       } else if (Array.isArray(current)) {
         current.push(...values);
       } else {
-        headers[headerName] = [current, ...values];
+        setHeader(headers, headerName, [current, ...values]);
       }
     }
     function normalizeHeaders(opts) {
@@ -47650,12 +51415,14 @@ var require_cache2 = __commonJS({
           if (excludeHeaders?.has(header.toLowerCase())) {
             continue;
           }
-          headers[header] = cacheKey.headers[header];
+          setHeader(headers, header, cacheKey.headers[header]);
         }
       }
       return JSON.stringify([cacheKey.origin, cacheKey.method, cacheKey.path, headers]);
     }
     module2.exports = {
+      getInterceptorOrigin,
+      getRequestOrigin,
       makeCacheKey,
       normalizeHeaders,
       assertCacheKey,
@@ -48178,6 +51945,7 @@ var require_cache_handler = __commonJS({
   "node_modules/undici/lib/handler/cache-handler.js"(exports2, module2) {
     "use strict";
     var util4 = require_util9();
+    var { kRedirectCacheControl } = require_symbols6();
     var {
       parseCacheControlHeader,
       hasInvalidCacheControlDirective,
@@ -48188,6 +51956,63 @@ var require_cache_handler = __commonJS({
     } = require_cache2();
     var { parseHttpDate } = require_date();
     function noop2() {
+    }
+    var CacheController = class {
+      #blocked = false;
+      #downstreamPaused = false;
+      constructor(target) {
+        this.target = target;
+      }
+      block() {
+        this.#blocked = true;
+      }
+      release() {
+        this.#blocked = false;
+        if (!this.#downstreamPaused) {
+          this.target.resume();
+        }
+      }
+      pause() {
+        this.#downstreamPaused = true;
+        this.target.pause();
+      }
+      resume() {
+        this.#downstreamPaused = false;
+        if (!this.#blocked) {
+          this.target.resume();
+        }
+      }
+      abort(reason) {
+        this.target.abort(reason);
+      }
+      get paused() {
+        return this.#downstreamPaused;
+      }
+      get aborted() {
+        return this.target.aborted;
+      }
+      get reason() {
+        return this.target.reason;
+      }
+      get rawHeaders() {
+        return this.target.rawHeaders;
+      }
+      set rawHeaders(value) {
+        this.target.rawHeaders = value;
+      }
+      get rawTrailers() {
+        return this.target.rawTrailers;
+      }
+      set rawTrailers(value) {
+        this.target.rawTrailers = value;
+      }
+    };
+    function sameOrigin(a, b2) {
+      try {
+        return new URL(String(a)).origin === new URL(String(b2)).origin;
+      } catch {
+        return String(a) === String(b2);
+      }
     }
     var HEURISTICALLY_CACHEABLE_STATUS_CODES = [
       200,
@@ -48302,9 +52127,20 @@ var require_cache_handler = __commonJS({
        */
       #handler;
       /**
+       * @type {CacheController | undefined}
+       */
+      #downstreamController;
+      /**
        * @type {import('node:stream').Writable | undefined}
        */
       #writeStream;
+      /**
+       * The URLs visited while following redirects, shared by reference from the
+       * redirect handler through the request context. Carries the suppressed hops'
+       * cache-control under {@link kRedirectCacheControl}.
+       * @type {URL[] | undefined}
+       */
+      #history;
       /**
        * @param {import('../../types/cache-interceptor.d.ts').default.CacheHandlerOptions} opts
        * @param {import('../../types/cache-interceptor.d.ts').default.CacheKey} cacheKey
@@ -48320,10 +52156,18 @@ var require_cache_handler = __commonJS({
       onRequestStart(controller, context) {
         this.#writeStream?.destroy();
         this.#writeStream = void 0;
-        this.#handler.onRequestStart?.(controller, context);
+        this.#downstreamController = new CacheController(controller);
+        this.#history = context?.history;
+        this.#handler.onRequestStart?.(this.#downstreamController, context);
       }
-      onRequestUpgrade(controller, statusCode, headers, socket) {
-        this.#handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
+      onBodySent(chunk) {
+        this.#handler.onBodySent?.(chunk);
+      }
+      onRequestSent() {
+        this.#handler.onRequestSent?.();
+      }
+      onRequestUpgrade(_controller, statusCode, headers, socket) {
+        this.#handler.onRequestUpgrade?.(this.#downstreamController, statusCode, headers, socket);
       }
       /**
        * @param {import('../../types/dispatcher.d.ts').default.DispatchController} controller
@@ -48333,7 +52177,7 @@ var require_cache_handler = __commonJS({
        */
       onResponseStart(controller, statusCode, resHeaders, statusMessage) {
         const downstreamOnHeaders = () => this.#handler.onResponseStart?.(
-          controller,
+          this.#downstreamController,
           statusCode,
           resHeaders,
           statusMessage
@@ -48343,7 +52187,27 @@ var require_cache_handler = __commonJS({
           invalidateUnsafeRequest(this.#store, this.#cacheKey, resHeaders);
           return downstreamOnHeaders();
         }
+        if (this.#history && this.#history.length > 0) {
+          const finalUrl = this.#history[this.#history.length - 1];
+          if (!sameOrigin(finalUrl.origin, this.#cacheKey.origin)) {
+            return downstreamOnHeaders();
+          }
+        }
+        const redirectCacheControl = this.#history?.[kRedirectCacheControl];
+        if (redirectCacheControl) {
+          for (const hopCacheControl of redirectCacheControl) {
+            const hopDirectives = hopCacheControl ? parseCacheControlHeader(hopCacheControl) : {};
+            if (hopDirectives["no-store"] === true || this.#cacheType === "shared" && hopDirectives.private === true) {
+              return downstreamOnHeaders();
+            }
+          }
+        }
         const cacheControlHeader = resHeaders["cache-control"];
+        const cacheControlDirectives = cacheControlHeader ? parseCacheControlHeader(cacheControlHeader) : {};
+        if (revalidationResponseDisallowsCachedReuse(this.#cacheType, resHeaders, cacheControlDirectives)) {
+          deleteCachedValue(this.#store, this.#cacheKey);
+          return downstreamOnHeaders();
+        }
         const heuristicallyCacheable = resHeaders["last-modified"] && arrayIncludes(HEURISTICALLY_CACHEABLE_STATUS_CODES, statusCode);
         if (!cacheControlHeader && !resHeaders["expires"] && !heuristicallyCacheable && !this.#cacheByDefault) {
           if (statusCode === 304 && resHeaders.vary && isInvalidOrWildcardVaryHeader(resHeaders.vary)) {
@@ -48351,8 +52215,7 @@ var require_cache_handler = __commonJS({
           }
           return downstreamOnHeaders();
         }
-        const cacheControlDirectives = cacheControlHeader ? parseCacheControlHeader(cacheControlHeader) : {};
-        if (!canCacheResponse(this.#cacheType, statusCode, resHeaders, cacheControlDirectives, this.#cacheKey.headers)) {
+        if (!canCacheResponse(this.#cacheType, this.#cacheKey.method, statusCode, resHeaders, cacheControlDirectives, this.#cacheKey.headers)) {
           if (statusCode === 304 && (cacheControlHeader || revalidationResponseDisallowsCachedReuse(this.#cacheType, resHeaders, cacheControlDirectives))) {
             deleteCachedValue(this.#store, this.#cacheKey);
           }
@@ -48407,9 +52270,19 @@ var require_cache_handler = __commonJS({
           deleteAt
         };
         if (statusCode === 304) {
+          let done = false;
+          const finish304 = () => {
+            if (done) {
+              return;
+            }
+            done = true;
+            this.#downstreamController.release();
+          };
           const handle304 = (cachedValue) => {
             if (!cachedValue) {
-              return downstreamOnHeaders();
+              downstreamOnHeaders();
+              finish304();
+              return;
             }
             value.statusCode = cachedValue.statusCode;
             value.statusMessage = cachedValue.statusMessage;
@@ -48419,39 +52292,48 @@ var require_cache_handler = __commonJS({
             downstreamOnHeaders();
             this.#writeStream = this.#store.createWriteStream(this.#cacheKey, value);
             if (!this.#writeStream || !cachedValue?.body) {
+              finish304();
               return;
             }
             if (typeof cachedValue.body.values === "function") {
               const bodyIterator = cachedValue.body.values();
               const streamCachedBody = () => {
+                if (done) {
+                  return;
+                }
                 for (const chunk of bodyIterator) {
-                  const full = this.#writeStream.write(chunk) === false;
-                  this.#handler.onResponseData?.(controller, chunk);
+                  const full = this.#writeStream?.write(chunk) === false;
+                  this.#handler.onResponseData?.(this.#downstreamController, chunk);
                   if (full) {
-                    break;
+                    return;
                   }
                 }
+                finish304();
               };
               this.#writeStream.on("error", function() {
                 handler.#writeStream = void 0;
                 handler.#store.delete(handler.#cacheKey);
+                streamCachedBody();
               }).on("drain", () => {
                 streamCachedBody();
               }).on("close", function() {
                 if (handler.#writeStream === this) {
                   handler.#writeStream = void 0;
+                  streamCachedBody();
                 }
               });
               streamCachedBody();
             } else if (typeof cachedValue.body.on === "function") {
               cachedValue.body.on("data", (chunk) => {
-                this.#writeStream.write(chunk);
-                this.#handler.onResponseData?.(controller, chunk);
+                this.#writeStream?.write(chunk);
+                this.#handler.onResponseData?.(this.#downstreamController, chunk);
               }).on("end", () => {
-                this.#writeStream.end();
+                this.#writeStream?.end();
+                finish304();
               }).on("error", () => {
                 this.#writeStream = void 0;
                 this.#store.delete(this.#cacheKey);
+                finish304();
               });
               this.#writeStream.on("error", function() {
                 handler.#writeStream = void 0;
@@ -48461,11 +52343,17 @@ var require_cache_handler = __commonJS({
                   handler.#writeStream = void 0;
                 }
               });
+            } else {
+              finish304();
             }
           };
           const result = this.#store.get(this.#cacheKey);
+          this.#downstreamController.block();
+          controller.pause();
           if (result && typeof result.then === "function") {
-            result.then(handle304);
+            result.then(handle304, () => handle304(void 0)).catch((err) => {
+              controller.abort(err);
+            });
           } else {
             handle304(result);
           }
@@ -48493,16 +52381,16 @@ var require_cache_handler = __commonJS({
         if (this.#writeStream?.write(chunk) === false) {
           controller.pause();
         }
-        this.#handler.onResponseData?.(controller, chunk);
+        this.#handler.onResponseData?.(this.#downstreamController, chunk);
       }
       onResponseEnd(controller, trailers) {
         this.#writeStream?.end();
-        this.#handler.onResponseEnd?.(controller, trailers);
+        this.#handler.onResponseEnd?.(this.#downstreamController, trailers);
       }
       onResponseError(controller, err) {
         this.#writeStream?.destroy(err);
         this.#writeStream = void 0;
-        this.#handler.onResponseError?.(controller, err);
+        this.#handler.onResponseError?.(this.#downstreamController, err);
       }
     };
     function deleteCachedValue(store, cacheKey) {
@@ -48517,9 +52405,12 @@ var require_cache_handler = __commonJS({
       }
     }
     function revalidationResponseDisallowsCachedReuse(cacheType, resHeaders, cacheControlDirectives) {
-      return cacheControlDirectives["no-store"] === true || cacheType === "shared" && cacheControlDirectives.private === true || (resHeaders.vary ? isInvalidOrWildcardVaryHeader(resHeaders.vary) : false);
+      return cacheControlDirectives["no-store"] === true || cacheType === "shared" && (cacheControlDirectives.private === true || Object.hasOwn(resHeaders, "set-cookie")) || (resHeaders.vary ? isInvalidOrWildcardVaryHeader(resHeaders.vary) : false);
     }
-    function canCacheResponse(cacheType, statusCode, resHeaders, cacheControlDirectives, reqHeaders) {
+    function canCacheResponse(cacheType, method, statusCode, resHeaders, cacheControlDirectives, reqHeaders) {
+      if (!arrayIncludes(util4.safeHTTPMethods, method)) {
+        return false;
+      }
       if (statusCode < 200 || arrayIncludes(NOT_UNDERSTOOD_STATUS_CODES, statusCode)) {
         return false;
       }
@@ -48530,7 +52421,7 @@ var require_cache_handler = __commonJS({
       if (cacheControlDirectives["no-store"]) {
         return false;
       }
-      if (cacheType === "shared" && cacheControlDirectives.private === true) {
+      if (cacheType === "shared" && (cacheControlDirectives.private === true || Object.hasOwn(resHeaders, "set-cookie"))) {
         return false;
       }
       if (resHeaders.vary && hasVaryStar(resHeaders.vary)) {
@@ -48765,7 +52656,7 @@ var require_memory_cache_store = __commonJS({
         return this.#size >= this.#maxSize || this.#count >= this.#maxCount;
       }
       /**
-       * @param {import('../../types/cache-interceptor.d.ts').default.CacheKey} req
+       * @param {import('../../types/cache-interceptor.d.ts').default.CacheKey} key
        * @returns {import('../../types/cache-interceptor.d.ts').default.GetResult | undefined}
        */
       get(key) {
@@ -48774,6 +52665,10 @@ var require_memory_cache_store = __commonJS({
         const now = Date.now();
         const entries = this.#entries.get(topLevelKey);
         const entry = entries ? findEntry(key, entries, now) : null;
+        if (entry != null) {
+          this.#entries.delete(topLevelKey);
+          this.#entries.set(topLevelKey, entries);
+        }
         return entry == null ? void 0 : {
           statusMessage: entry.statusMessage,
           statusCode: entry.statusCode,
@@ -48813,11 +52708,13 @@ var require_memory_cache_store = __commonJS({
           },
           final(callback) {
             let entries = store.#entries.get(topLevelKey);
-            if (!entries) {
+            if (entries) {
+              store.#entries.delete(topLevelKey);
+            } else {
               entries = [];
-              store.#entries.set(topLevelKey, entries);
             }
-            const previousEntry = findEntry(key, entries, Date.now());
+            store.#entries.set(topLevelKey, entries);
+            const previousEntry = findEntry(key, entries, -Infinity);
             if (previousEntry) {
               const index = entries.indexOf(previousEntry);
               entries.splice(index, 1, entry);
@@ -48837,15 +52734,7 @@ var require_memory_cache_store = __commonJS({
                 });
                 store.#hasEmittedMaxSizeEvent = true;
               }
-              for (const [key2, entries2] of store.#entries) {
-                for (const entry2 of entries2.splice(0, entries2.length / 2)) {
-                  store.#size -= entry2.size;
-                  store.#count -= 1;
-                }
-                if (entries2.length === 0) {
-                  store.#entries.delete(key2);
-                }
-              }
+              store.#evict(entry);
               if (store.#size < store.#maxSize && store.#count < store.#maxCount) {
                 store.#hasEmittedMaxSizeEvent = false;
               }
@@ -48853,6 +52742,38 @@ var require_memory_cache_store = __commonJS({
             callback(null);
           }
         });
+      }
+      #evict(keep) {
+        const targetSize = this.#maxSize / 2;
+        const targetCount = this.#maxCount / 2;
+        for (const [key, entries] of this.#entries) {
+          for (let i = 0; i < entries.length && (this.#size > targetSize || this.#count > targetCount); ) {
+            const entry = entries[i];
+            if (entry === keep) {
+              i++;
+              continue;
+            }
+            entries.splice(i, 1);
+            this.#size -= entry.size;
+            this.#count -= 1;
+          }
+          if (entries.length === 0) {
+            this.#entries.delete(key);
+          }
+          if (this.#size <= targetSize && this.#count <= targetCount) {
+            return;
+          }
+        }
+        if (this.#size > this.#maxSize || this.#count > this.#maxCount) {
+          const topLevelKey = `${keep.origin}:${keep.path}`;
+          const entries = this.#entries.get(topLevelKey);
+          entries.splice(entries.indexOf(keep), 1);
+          this.#size -= keep.size;
+          this.#count -= 1;
+          if (entries.length === 0) {
+            this.#entries.delete(topLevelKey);
+          }
+        }
       }
       /**
        * @param {CacheKey} key
@@ -49015,7 +52936,16 @@ var require_cache3 = __commonJS({
     var CacheHandler = require_cache_handler();
     var MemoryCacheStore = require_memory_cache_store();
     var CacheRevalidationHandler = require_cache_revalidation_handler();
-    var { assertCacheStore, assertCacheMethods, makeCacheKey, normalizeHeaders, parseCacheControlHeader, isInvalidOrWildcardVaryHeader } = require_cache2();
+    var {
+      assertCacheStore,
+      assertCacheMethods,
+      getInterceptorOrigin,
+      makeCacheKey,
+      normalizeHeaders,
+      parseCacheControlHeader,
+      isInvalidOrWildcardVaryHeader,
+      parseVaryHeader
+    } = require_cache2();
     var { AbortError } = require_errors2();
     var { parseHttpDate } = require_date();
     function assertCacheOrigins(origins, name) {
@@ -49081,7 +53011,7 @@ var require_cache3 = __commonJS({
       result.cacheControlDirectives?.["s-maxage"] !== void 0);
     }
     function revalidationResponseDisallowsCachedReuse(cacheType, headers) {
-      if (headers.vary && isInvalidOrWildcardVaryHeader(headers.vary)) {
+      if (headers.vary && isInvalidOrWildcardVaryHeader(headers.vary) || cacheType === "shared" && Object.hasOwn(headers, "set-cookie")) {
         return true;
       }
       const cacheControl = headers["cache-control"];
@@ -49093,6 +53023,17 @@ var require_cache3 = __commonJS({
     }
     function revalidationResponseUpdatesCacheControl(headers) {
       return headers["cache-control"] !== void 0;
+    }
+    function revalidationResponseAddsVary(result, varyDirectives) {
+      if (!varyDirectives) {
+        return false;
+      }
+      for (const key in varyDirectives) {
+        if (result.vary == null || !Object.hasOwn(result.vary, key)) {
+          return true;
+        }
+      }
+      return false;
     }
     function deleteCachedValue(store, cacheKey) {
       try {
@@ -49125,7 +53066,7 @@ var require_cache3 = __commonJS({
     }
     function isStale(result, cacheControlDirectives, cacheType) {
       const now = Date.now();
-      if (now > result.staleAt) {
+      if (now > result.staleAt || result.staleAt <= result.cachedAt) {
         if (!staleResponseRequiresRevalidation(result, cacheType) && cacheControlDirectives?.["max-stale"]) {
           const gracePeriod = result.staleAt + cacheControlDirectives["max-stale"] * 1e3;
           return now > gracePeriod;
@@ -49189,6 +53130,8 @@ var require_cache3 = __commonJS({
       const stream4 = util4.isStream(result.body) ? result.body : Readable5.from(result.body ?? []);
       assert(!stream4.destroyed, "stream should not be destroyed");
       assert(!stream4.readableDidRead, "stream should not be readableDidRead");
+      let aborted = false;
+      let abortReason = null;
       const controller = {
         rawHeaders: [],
         rawTrailers: [],
@@ -49202,13 +53145,18 @@ var require_cache3 = __commonJS({
           return stream4.isPaused();
         },
         get aborted() {
-          return stream4.destroyed;
+          return aborted;
         },
         get reason() {
-          return stream4.errored;
+          return abortReason;
         },
         abort(reason) {
-          stream4.destroy(reason ?? new AbortError());
+          if (aborted) {
+            return;
+          }
+          aborted = true;
+          abortReason = reason ?? new AbortError();
+          stream4.destroy(abortReason);
         }
       };
       stream4.on("error", function(err) {
@@ -49244,6 +53192,13 @@ var require_cache3 = __commonJS({
     }
     function handleResult(dispatch, globalOpts, cacheKey, handler, opts, reqCacheControl, result) {
       if (!result) {
+        return handleUncachedResponse(dispatch, globalOpts, cacheKey, handler, opts, reqCacheControl);
+      }
+      if (globalOpts.type === "shared" && Object.hasOwn(result.headers, "set-cookie")) {
+        if (util4.isStream(result.body)) {
+          result.body.on("error", nop).destroy();
+        }
+        deleteCachedValue(globalOpts.store, cacheKey);
         return handleUncachedResponse(dispatch, globalOpts, cacheKey, handler, opts, reqCacheControl);
       }
       const now = Date.now();
@@ -49312,6 +53267,12 @@ var require_cache3 = __commonJS({
                   }
                   if (revalidationResponseUpdatesCacheControl(headers2)) {
                     deleteCachedValue(globalOpts.store, cacheKey);
+                  } else if (revalidationResponseAddsVary(result, headers2.vary ? parseVaryHeader(headers2.vary, opts.headers) : void 0)) {
+                    if (util4.isStream(result.body)) {
+                      result.body.on("error", nop).destroy();
+                    }
+                    deleteCachedValue(globalOpts.store, cacheKey);
+                    return dispatch(opts, new CacheHandler(globalOpts, cacheKey, handler));
                   }
                 }
                 sendCachedValue(handler, opts, result, age, context, stale);
@@ -49362,25 +53323,23 @@ var require_cache3 = __commonJS({
           safeMethodsToNotCache.push(method);
         }
       }
-      return (dispatch) => {
+      return (dispatch, interceptorOrigin) => {
         return (opts2, handler) => {
-          if (arrayIncludes(safeMethodsToNotCache, opts2.method)) {
+          const requestOrigin = getInterceptorOrigin(opts2, interceptorOrigin);
+          if (!requestOrigin || arrayIncludes(safeMethodsToNotCache, opts2.method)) {
             return dispatch(opts2, handler);
           }
           if (origins !== void 0) {
-            if (!opts2.origin) {
-              return dispatch(opts2, handler);
-            }
-            const requestOrigin = opts2.origin.toString().toLowerCase();
+            const normalizedRequestOrigin = requestOrigin.toString().toLowerCase();
             let isAllowed = false;
             for (let i = 0; i < origins.length; i++) {
               const allowed = origins[i];
               if (typeof allowed === "string") {
-                if (allowed.toLowerCase() === requestOrigin) {
+                if (allowed.toLowerCase() === normalizedRequestOrigin) {
                   isAllowed = true;
                   break;
                 }
-              } else if (allowed.test(requestOrigin)) {
+              } else if (allowed.test(normalizedRequestOrigin)) {
                 isAllowed = true;
                 break;
               }
@@ -49397,7 +53356,10 @@ var require_cache3 = __commonJS({
           if (reqCacheControl?.["no-store"]) {
             return dispatch(opts2, handler);
           }
-          const cacheKey = makeCacheKey(opts2);
+          const cacheKey = makeCacheKey(opts2, requestOrigin);
+          if (!arrayIncludes(util4.safeHTTPMethods, opts2.method)) {
+            return dispatch(opts2, new CacheHandler(globalOpts, cacheKey, handler));
+          }
           const result = store.get(cacheKey);
           if (result && typeof result.then === "function") {
             return result.then((result2) => handleResult(
@@ -49430,22 +53392,95 @@ var require_cache3 = __commonJS({
 var require_decompress = __commonJS({
   "node_modules/undici/lib/interceptor/decompress.js"(exports2, module2) {
     "use strict";
-    var { createInflate, createGunzip: createGunzip2, createBrotliDecompress, createZstdDecompress } = require("node:zlib");
-    var { pipeline } = require("node:stream");
+    var { createInflate, createGunzip: createGunzip2, createBrotliDecompress, createZstdDecompress, constants: constants3 } = require("node:zlib");
+    var { pipeline, Transform: TransformStream2 } = require("node:stream");
+    var { InvalidArgumentError, ResponseExceededMaxSizeError } = require_errors2();
     var DecoratorHandler = require_decorator_handler2();
+    var DecompressController = class {
+      #onPause;
+      #onResume;
+      #onAbort;
+      #paused = false;
+      constructor(onPause, onResume, onAbort) {
+        this.#onPause = onPause;
+        this.#onResume = onResume;
+        this.#onAbort = onAbort;
+        this.target = null;
+      }
+      pause() {
+        if (this.#paused) {
+          return;
+        }
+        this.#paused = true;
+        this.#onPause();
+      }
+      resume() {
+        if (!this.#paused) {
+          return;
+        }
+        this.#paused = false;
+        this.#onResume();
+      }
+      abort(reason) {
+        this.target?.abort(reason);
+        this.#onAbort(reason);
+      }
+      get paused() {
+        return this.#paused;
+      }
+      get aborted() {
+        return this.target?.aborted ?? false;
+      }
+      get reason() {
+        return this.target?.reason ?? null;
+      }
+      get rawHeaders() {
+        return this.target?.rawHeaders ?? null;
+      }
+      set rawHeaders(value) {
+        if (this.target) {
+          this.target.rawHeaders = value;
+        }
+      }
+      get rawTrailers() {
+        return this.target?.rawTrailers ?? null;
+      }
+      set rawTrailers(value) {
+        if (this.target) {
+          this.target.rawTrailers = value;
+        }
+      }
+    };
     var supportedEncodings = {
+      __proto__: null,
       gzip: createGunzip2,
       "x-gzip": createGunzip2,
       br: createBrotliDecompress,
       deflate: createInflate,
-      compress: createInflate,
-      "x-compress": createInflate,
-      zstd: createZstdDecompress
+      // https://www.rfc-editor.org/rfc/rfc9659.html#section-3
+      zstd: createZstdDecompress.bind(null, { params: { [constants3.ZSTD_d_windowLogMax]: 23 } })
     };
     var defaultSkipStatusCodes = (
       /** @type {const} */
       [204, 304]
     );
+    var defaultMaxSize = 0;
+    function createMaxSizeLimiter(maxSize) {
+      let size = 0;
+      return new TransformStream2({
+        transform(chunk, _encoding, callback) {
+          const decompressedSize = size + chunk.length;
+          if (decompressedSize > maxSize) {
+            callback(new ResponseExceededMaxSizeError(
+              `Decompressed response size (${decompressedSize}) exceeded maxSize (${maxSize})`
+            ));
+            return;
+          }
+          size = decompressedSize;
+          callback(null, chunk);
+        }
+      });
+    }
     var warningEmitted = (
       /** @type {boolean} */
       false
@@ -49459,10 +53494,132 @@ var require_decompress = __commonJS({
       #skipStatusCodes;
       /** @type {boolean} */
       #skipErrorResponses;
-      constructor(handler, { skipStatusCodes = defaultSkipStatusCodes, skipErrorResponses = true } = {}) {
+      /** @type {number} */
+      #maxSize;
+      /** @type {number} */
+      #decompressedSize = 0;
+      /** @type {boolean} */
+      #terminated = false;
+      /** @type {boolean} */
+      #inputEnded = false;
+      /** @type {boolean} */
+      #inputBackpressured = false;
+      /** @type {boolean} */
+      #upstreamPaused = false;
+      /** @type {boolean} */
+      #draining = false;
+      /** @type {boolean} */
+      #drainRequested = false;
+      /** @type {boolean} */
+      #completionPending = false;
+      /** @type {DecompressorStream | undefined} */
+      #finalDecompressor;
+      /** @type {DecompressController} */
+      #controller;
+      constructor(handler, { skipStatusCodes = defaultSkipStatusCodes, skipErrorResponses = true, maxSize = defaultMaxSize } = {}) {
+        if (!Number.isSafeInteger(maxSize) || maxSize < 0) {
+          throw new InvalidArgumentError("maxSize must be a non-negative integer");
+        }
         super(handler);
         this.#skipStatusCodes = skipStatusCodes;
         this.#skipErrorResponses = skipErrorResponses;
+        this.#maxSize = maxSize;
+        this.#controller = new DecompressController(
+          () => this.#onDownstreamPause(),
+          () => this.#onDownstreamResume(),
+          (reason) => {
+            if (this.#inputEnded && !this.#terminated) {
+              this.onResponseError(this.#controller, reason);
+            }
+          }
+        );
+      }
+      #onDownstreamPause() {
+        this.#pauseUpstream();
+      }
+      #onDownstreamResume() {
+        const drainWasDeferred = this.#draining;
+        this.#drainOutput();
+        if (!drainWasDeferred) {
+          this.#resumeUpstreamIfNeeded();
+          this.#finishIfReady();
+        }
+      }
+      #pauseUpstream() {
+        if (!this.#upstreamPaused && !this.#terminated) {
+          this.#upstreamPaused = true;
+          this.#controller.target?.pause();
+        }
+      }
+      #resumeUpstreamIfNeeded() {
+        if (this.#upstreamPaused && !this.#controller.paused && !this.#inputBackpressured) {
+          this.#upstreamPaused = false;
+          if (!this.#inputEnded) {
+            this.#controller.target?.resume();
+          }
+        }
+      }
+      #drainOutput() {
+        if (this.#terminated || this.#controller.paused || !this.#finalDecompressor) {
+          return;
+        }
+        if (this.#draining) {
+          this.#drainRequested = true;
+          return;
+        }
+        this.#draining = true;
+        try {
+          do {
+            this.#drainRequested = false;
+            let chunk;
+            while (!this.#terminated && !this.#controller.paused && (chunk = this.#finalDecompressor.read()) !== null) {
+              if (this.#maxSize > 0) {
+                const decompressedSize = this.#decompressedSize + chunk.length;
+                if (decompressedSize > this.#maxSize) {
+                  this.#fail(new ResponseExceededMaxSizeError(
+                    `Decompressed response size (${decompressedSize}) exceeded maxSize (${this.#maxSize})`
+                  ));
+                  return;
+                }
+                this.#decompressedSize = decompressedSize;
+              }
+              try {
+                const result = super.onResponseData(this.#controller, chunk);
+                if (result === false && !this.#controller.paused) {
+                  this.#controller.pause();
+                }
+              } catch (err) {
+                this.#fail(err);
+                return;
+              }
+            }
+          } while (this.#drainRequested && !this.#terminated && !this.#controller.paused);
+        } finally {
+          this.#draining = false;
+        }
+        this.#resumeUpstreamIfNeeded();
+        this.#finishIfReady();
+      }
+      #finishIfReady() {
+        if (this.#terminated || !this.#completionPending || this.#controller.paused || this.#draining) {
+          return;
+        }
+        this.#cleanupDecompressors();
+        try {
+          super.onResponseEnd(this.#controller, this.#trailers);
+        } catch (err) {
+          this.#fail(err);
+          return;
+        }
+        this.#terminated = true;
+      }
+      #onDecompressionEnd() {
+        if (this.#terminated) {
+          return;
+        }
+        this.#completionPending = true;
+        this.#drainOutput();
+        this.#finishIfReady();
       }
       /**
        * Determines if decompression should be skipped based on encoding and status code
@@ -49480,7 +53637,7 @@ var require_decompress = __commonJS({
        * Creates a chain of decompressors for multiple content encodings
        *
        * @param {string} encodings - Comma-separated list of content encodings
-       * @returns {Array<DecompressorStream>} - Array of decompressor streams
+       * @returns {Array<Transform>} - Array of decompressor and limiting streams
        * @throws {Error} - If the number of content-encodings exceeds the maximum allowed
        */
       #createDecompressionChain(encodings) {
@@ -49499,54 +53656,81 @@ var require_decompress = __commonJS({
           }
           decompressors.push(supportedEncodings[encoding]());
         }
-        return decompressors;
+        if (decompressors.length < 2) {
+          return decompressors;
+        }
+        const streams = [];
+        for (let i = 0; i < decompressors.length; i++) {
+          streams.push(decompressors[i]);
+          if (i < decompressors.length - 1 && this.#maxSize > 0) {
+            streams.push(createMaxSizeLimiter(this.#maxSize));
+          }
+        }
+        return streams;
       }
       /**
-       * Sets up event handlers for a decompressor stream using readable events
-       * @param {DecompressorStream} decompressor - The decompressor stream
-       * @param {Controller} controller - The controller to coordinate with
+       * Stops decompression and reports an error.
+       * @param {Error} error - The decompression error
        * @returns {void}
        */
-      #setupDecompressorEvents(decompressor, controller) {
-        decompressor.on("readable", () => {
-          let chunk;
-          while ((chunk = decompressor.read()) !== null) {
-            const result = super.onResponseData(controller, chunk);
-            if (result === false) {
-              break;
-            }
-          }
-        });
-        decompressor.on("error", (error2) => {
-          super.onResponseError(controller, error2);
-        });
+      #fail(error2) {
+        if (this.#terminated) {
+          return;
+        }
+        if (this.#inputEnded) {
+          this.onResponseError(this.#controller, error2);
+        } else {
+          this.#controller.abort(error2);
+        }
+      }
+      /**
+       * Sets up event handlers for the final decompressor stream.
+       * @param {DecompressorStream} decompressor - The decompressor stream
+       * @returns {void}
+       */
+      #setupDecompressorEvents(decompressor) {
+        this.#finalDecompressor = decompressor;
+        decompressor.on("readable", () => this.#drainOutput());
+        decompressor.on("error", (error2) => this.#fail(error2));
       }
       /**
        * Sets up event handling for a single decompressor
-       * @param {Controller} controller - The controller to handle events
        * @returns {void}
        */
-      #setupSingleDecompressor(controller) {
+      #setupSingleDecompressor() {
         const decompressor = this.#decompressors[0];
-        this.#setupDecompressorEvents(decompressor, controller);
-        decompressor.on("end", () => {
-          super.onResponseEnd(controller, this.#trailers);
-        });
+        this.#setupDecompressorEvents(decompressor);
+        decompressor.on("end", () => this.#onDecompressionEnd());
       }
       /**
        * Sets up event handling for multiple chained decompressors using pipeline
-       * @param {Controller} controller - The controller to handle events
        * @returns {void}
        */
-      #setupMultipleDecompressors(controller) {
+      #setupMultipleDecompressors() {
         const lastDecompressor = this.#decompressors[this.#decompressors.length - 1];
-        this.#setupDecompressorEvents(lastDecompressor, controller);
+        this.#setupDecompressorEvents(lastDecompressor);
         pipeline(this.#decompressors, (err) => {
-          if (err) {
-            super.onResponseError(controller, err);
+          if (this.#terminated) {
             return;
           }
-          super.onResponseEnd(controller, this.#trailers);
+          if (err) {
+            this.#fail(err);
+            return;
+          }
+          this.#onDecompressionEnd();
+        });
+      }
+      #setupInputBackpressure() {
+        const decompressor = this.#decompressors[0];
+        decompressor.on("drain", () => {
+          if (this.#terminated) {
+            return;
+          }
+          this.#inputBackpressured = false;
+          if (!this.#controller.paused) {
+            this.#drainOutput();
+            this.#resumeUpstreamIfNeeded();
+          }
         });
       }
       /**
@@ -49555,6 +53739,14 @@ var require_decompress = __commonJS({
        */
       #cleanupDecompressors() {
         this.#decompressors.length = 0;
+        this.#finalDecompressor = void 0;
+      }
+      onRequestStart(controller, context) {
+        this.#controller.target = controller;
+        return super.onRequestStart(this.#controller, context);
+      }
+      onRequestUpgrade(controller, statusCode, headers, socket) {
+        return super.onRequestUpgrade(this.#controller, statusCode, headers, socket);
       }
       /**
        * @param {Controller} controller
@@ -49564,19 +53756,20 @@ var require_decompress = __commonJS({
        * @returns {void}
        */
       onResponseStart(controller, statusCode, headers, statusMessage) {
-        const contentEncoding = headers["content-encoding"];
+        const rawContentEncoding = headers["content-encoding"];
+        const contentEncoding = Array.isArray(rawContentEncoding) ? rawContentEncoding.join(",") : rawContentEncoding;
         if (this.#shouldSkipDecompression(contentEncoding, statusCode)) {
-          return super.onResponseStart(controller, statusCode, headers, statusMessage);
+          return super.onResponseStart(this.#controller, statusCode, headers, statusMessage);
         }
         const decompressors = this.#createDecompressionChain(contentEncoding.toLowerCase());
         if (decompressors.length === 0) {
           this.#cleanupDecompressors();
-          return super.onResponseStart(controller, statusCode, headers, statusMessage);
+          return super.onResponseStart(this.#controller, statusCode, headers, statusMessage);
         }
         this.#decompressors = decompressors;
         const { "content-encoding": _3, "content-length": __, ...newHeaders } = headers;
-        if (controller?.rawHeaders) {
-          const rawHeaders = controller.rawHeaders;
+        if (this.#controller.rawHeaders) {
+          const rawHeaders = this.#controller.rawHeaders;
           if (Array.isArray(rawHeaders)) {
             const filteredHeaders = [];
             for (let i = 0; i < rawHeaders.length; i += 2) {
@@ -49588,7 +53781,7 @@ var require_decompress = __commonJS({
               }
               filteredHeaders.push(rawHeaders[i], rawHeaders[i + 1]);
             }
-            controller.rawHeaders = filteredHeaders;
+            rawHeaders.splice(0, rawHeaders.length, ...filteredHeaders);
           } else if (typeof rawHeaders === "object") {
             for (const name of Object.keys(rawHeaders)) {
               const lowerName = name.toLowerCase();
@@ -49598,12 +53791,13 @@ var require_decompress = __commonJS({
             }
           }
         }
+        this.#setupInputBackpressure();
         if (this.#decompressors.length === 1) {
-          this.#setupSingleDecompressor(controller);
+          this.#setupSingleDecompressor();
         } else {
-          this.#setupMultipleDecompressors(controller);
+          this.#setupMultipleDecompressors();
         }
-        return super.onResponseStart(controller, statusCode, newHeaders, statusMessage);
+        return super.onResponseStart(this.#controller, statusCode, newHeaders, statusMessage);
       }
       /**
        * @param {Controller} controller
@@ -49612,10 +53806,13 @@ var require_decompress = __commonJS({
        */
       onResponseData(controller, chunk) {
         if (this.#decompressors.length > 0) {
-          this.#decompressors[0].write(chunk);
+          if (!this.#decompressors[0].write(chunk)) {
+            this.#inputBackpressured = true;
+            this.#pauseUpstream();
+          }
           return;
         }
-        super.onResponseData(controller, chunk);
+        return super.onResponseData(this.#controller, chunk);
       }
       /**
        * @param {Controller} controller
@@ -49624,12 +53821,12 @@ var require_decompress = __commonJS({
        */
       onResponseEnd(controller, trailers) {
         if (this.#decompressors.length > 0) {
+          this.#inputEnded = true;
           this.#trailers = trailers;
           this.#decompressors[0].end();
-          this.#cleanupDecompressors();
           return;
         }
-        super.onResponseEnd(controller, trailers);
+        return super.onResponseEnd(this.#controller, trailers);
       }
       /**
        * @param {Controller} controller
@@ -49637,13 +53834,15 @@ var require_decompress = __commonJS({
        * @returns {void}
        */
       onResponseError(controller, err) {
-        if (this.#decompressors.length > 0) {
-          for (const decompressor of this.#decompressors) {
-            decompressor.destroy(err);
-          }
-          this.#cleanupDecompressors();
+        if (this.#terminated) {
+          return;
         }
-        super.onResponseError(controller, err);
+        this.#terminated = true;
+        for (const decompressor of this.#decompressors) {
+          decompressor.destroy();
+        }
+        this.#cleanupDecompressors();
+        super.onResponseError(this.#controller, err);
       }
     };
     function createDecompressInterceptor(options = {}) {
@@ -49679,6 +53878,18 @@ var require_deduplication_handler = __commonJS({
        * @type {DispatchHandler}
        */
       #primaryHandler;
+      /**
+       * Whether the primary request has started (onRequestStart received). Until
+       * then the request context is unknown and cannot be given to waiting handlers.
+       * @type {boolean}
+       */
+      #requestStarted = false;
+      /**
+       * The primary request context, replayed to waiting handlers so they observe
+       * the same redirect history as the primary.
+       * @type {any}
+       */
+      #context = null;
       /**
        * @type {WaitingHandler[]}
        */
@@ -49747,18 +53958,22 @@ var require_deduplication_handler = __commonJS({
         const waitingHandler = this.#createWaitingHandler(handler);
         const waitingController = waitingHandler.controller;
         try {
-          handler.onRequestStart?.(waitingController, null);
-          if (waitingController.aborted) {
-            waitingHandler.done = true;
-            return true;
-          }
-          if (this.#responseStarted) {
-            handler.onResponseStart?.(
-              waitingController,
-              this.#statusCode,
-              this.#headers,
-              this.#statusMessage
-            );
+          if (this.#requestStarted) {
+            handler.onRequestStart?.(waitingController, this.#context);
+            if (waitingController.aborted) {
+              waitingHandler.done = true;
+              return true;
+            }
+            if (this.#responseStarted) {
+              handler.onResponseStart?.(
+                waitingController,
+                this.#statusCode,
+                this.#headers,
+                this.#statusMessage
+              );
+            }
+          } else {
+            waitingHandler.pendingStart = true;
           }
         } catch {
           waitingHandler.done = true;
@@ -49775,6 +53990,21 @@ var require_deduplication_handler = __commonJS({
        */
       onRequestStart(controller, context) {
         this.#controller = controller;
+        if (!this.#requestStarted) {
+          this.#requestStarted = true;
+          this.#context = context;
+          for (const waitingHandler of this.#waitingHandlers) {
+            if (waitingHandler.pendingStart && !waitingHandler.done && !waitingHandler.controller.aborted) {
+              waitingHandler.pendingStart = false;
+              try {
+                waitingHandler.handler.onRequestStart?.(waitingHandler.controller, context);
+              } catch {
+                waitingHandler.done = true;
+              }
+            }
+          }
+          this.#pruneDoneWaitingHandlers();
+        }
         this.#primaryHandler.onRequestStart?.(controller, context);
       }
       /**
@@ -49860,29 +54090,30 @@ var require_deduplication_handler = __commonJS({
           return;
         }
         this.#completed = true;
-        this.#primaryHandler.onResponseEnd?.(controller, trailers);
-        for (const waitingHandler of this.#waitingHandlers) {
-          if (waitingHandler.done || waitingHandler.controller.aborted) {
-            waitingHandler.done = true;
-            continue;
+        this.#cleanup();
+        try {
+          this.#primaryHandler.onResponseEnd?.(controller, trailers);
+        } catch (err) {
+          this.#primaryHandler.onResponseError?.(controller, err);
+        } finally {
+          for (const waitingHandler of this.#waitingHandlers) {
+            if (waitingHandler.done || waitingHandler.controller.aborted) {
+              waitingHandler.done = true;
+              continue;
+            }
+            this.#flushWaitingHandler(waitingHandler);
+            if (waitingHandler.done || waitingHandler.controller.aborted) {
+              waitingHandler.done = true;
+              continue;
+            }
+            if (waitingHandler.controller.paused) {
+              waitingHandler.pendingTrailers = trailers;
+              continue;
+            }
+            this.#endWaitingHandler(waitingHandler, trailers);
           }
-          this.#flushWaitingHandler(waitingHandler);
-          if (waitingHandler.done || waitingHandler.controller.aborted) {
-            waitingHandler.done = true;
-            continue;
-          }
-          if (waitingHandler.controller.paused && waitingHandler.bufferedChunks.length > 0) {
-            waitingHandler.pendingTrailers = trailers;
-            continue;
-          }
-          try {
-            waitingHandler.handler.onResponseEnd?.(waitingHandler.controller, trailers);
-          } catch {
-          }
-          waitingHandler.done = true;
+          this.#pruneDoneWaitingHandlers();
         }
-        this.#pruneDoneWaitingHandlers();
-        this.#onComplete?.();
       }
       /**
        * @param {import('../../types/dispatcher.d.ts').default.DispatchController} controller
@@ -49894,12 +54125,20 @@ var require_deduplication_handler = __commonJS({
         }
         this.#aborted = true;
         this.#completed = true;
-        this.#primaryHandler.onResponseError?.(controller, err);
-        for (const waitingHandler of this.#waitingHandlers) {
-          this.#errorWaitingHandler(waitingHandler, err);
+        this.#cleanup();
+        try {
+          this.#primaryHandler.onResponseError?.(controller, err);
+        } finally {
+          for (const waitingHandler of this.#waitingHandlers) {
+            this.#errorWaitingHandler(waitingHandler, err);
+          }
+          this.#waitingHandlers = [];
         }
-        this.#waitingHandlers = [];
-        this.#onComplete?.();
+      }
+      #cleanup() {
+        const onComplete = this.#onComplete;
+        this.#onComplete = null;
+        onComplete?.();
       }
       /**
        * @param {DispatchHandler} handler
@@ -49912,7 +54151,8 @@ var require_deduplication_handler = __commonJS({
           bufferedChunks: [],
           bufferedBytes: 0,
           pendingTrailers: null,
-          done: false
+          done: false,
+          pendingStart: false
         };
         const state = {
           aborted: false,
@@ -49927,12 +54167,7 @@ var require_deduplication_handler = __commonJS({
             state.paused = false;
             this.#flushWaitingHandler(waitingHandler);
             if (this.#completed && waitingHandler.pendingTrailers && waitingHandler.bufferedChunks.length === 0 && !state.paused && !state.aborted) {
-              try {
-                waitingHandler.handler.onResponseEnd?.(waitingHandler.controller, waitingHandler.pendingTrailers);
-              } catch {
-              }
-              waitingHandler.pendingTrailers = null;
-              waitingHandler.done = true;
+              this.#endWaitingHandler(waitingHandler, waitingHandler.pendingTrailers);
             }
             this.#pruneDoneWaitingHandlers();
           },
@@ -49951,12 +54186,19 @@ var require_deduplication_handler = __commonJS({
             return state.reason;
           },
           abort: (reason) => {
+            if (state.aborted) {
+              return;
+            }
             state.aborted = true;
             state.reason = reason ?? null;
             waitingHandler.done = true;
             waitingHandler.pendingTrailers = null;
             waitingHandler.bufferedChunks = [];
             waitingHandler.bufferedBytes = 0;
+            try {
+              handler.onResponseError?.(waitingHandler.controller, state.reason ?? new RequestAbortedError());
+            } catch {
+            }
           }
         };
         return waitingHandler;
@@ -49977,7 +54219,7 @@ var require_deduplication_handler = __commonJS({
         waitingHandler.bufferedBytes += bufferedChunk.length;
         if (waitingHandler.bufferedBytes > this.#maxBufferSize) {
           const err = new RequestAbortedError(`Deduplicated waiting handler exceeded maxBufferSize (${this.#maxBufferSize} bytes) while paused`);
-          this.#errorWaitingHandler(waitingHandler, err);
+          waitingHandler.controller.abort(err);
         }
       }
       /**
@@ -50003,6 +54245,22 @@ var require_deduplication_handler = __commonJS({
       }
       /**
        * @param {WaitingHandler} waitingHandler
+       * @param {object} trailers
+       */
+      #endWaitingHandler(waitingHandler, trailers) {
+        waitingHandler.done = true;
+        waitingHandler.pendingTrailers = null;
+        try {
+          waitingHandler.handler.onResponseEnd?.(waitingHandler.controller, trailers);
+        } catch (err) {
+          try {
+            waitingHandler.handler.onResponseError?.(waitingHandler.controller, err);
+          } catch {
+          }
+        }
+      }
+      /**
+       * @param {WaitingHandler} waitingHandler
        * @param {Error} err
        */
       #errorWaitingHandler(waitingHandler, err) {
@@ -50014,7 +54272,6 @@ var require_deduplication_handler = __commonJS({
         waitingHandler.bufferedChunks = [];
         waitingHandler.bufferedBytes = 0;
         try {
-          waitingHandler.controller.abort(err);
           waitingHandler.handler.onResponseError?.(waitingHandler.controller, err);
         } catch {
         }
@@ -50034,7 +54291,7 @@ var require_deduplicate = __commonJS({
     var diagnosticsChannel = require("node:diagnostics_channel");
     var util4 = require_util9();
     var DeduplicationHandler = require_deduplication_handler();
-    var { normalizeHeaders, makeCacheKey, makeDeduplicationKey } = require_cache2();
+    var { getInterceptorOrigin, normalizeHeaders, makeCacheKey, makeDeduplicationKey } = require_cache2();
     var pendingRequestsChannel = diagnosticsChannel.channel("undici:request:pending-requests");
     module2.exports = (opts = {}) => {
       const {
@@ -50066,9 +54323,10 @@ var require_deduplicate = __commonJS({
       const skipHeaderNamesSet = new Set(skipHeaderNames.map((name) => name.toLowerCase()));
       const excludeHeaderNamesSet = new Set(excludeHeaderNames.map((name) => name.toLowerCase()));
       const pendingRequests = /* @__PURE__ */ new Map();
-      return (dispatch) => {
+      return (dispatch, interceptorOrigin) => {
         return (opts2, handler) => {
-          if (opts2.upgrade || methods.includes(opts2.method) === false) {
+          const requestOrigin = getInterceptorOrigin(opts2, interceptorOrigin);
+          if (!requestOrigin || opts2.upgrade || methods.includes(opts2.method) === false) {
             return dispatch(opts2, handler);
           }
           opts2 = {
@@ -50082,7 +54340,7 @@ var require_deduplicate = __commonJS({
               }
             }
           }
-          const cacheKey = makeCacheKey(opts2);
+          const cacheKey = makeCacheKey(opts2, requestOrigin);
           const dedupeKey = makeDeduplicationKey(cacheKey, excludeHeaderNamesSet);
           const pendingHandler = pendingRequests.get(dedupeKey);
           if (pendingHandler) {
@@ -50118,12 +54376,16 @@ var require_sqlite_cache_store = __commonJS({
     "use strict";
     var { Writable: Writable2 } = require("node:stream");
     var { assertCacheKey, assertCacheValue } = require_cache2();
+    var { zstdCompressSync, zstdDecompressSync } = require("node:zlib");
     var DatabaseSync;
-    var VERSION3 = 3;
+    var VERSION3 = 4;
     var MAX_ENTRY_SIZE = 2 * 1e3 * 1e3 * 1e3;
+    var COMPRESS_THRESHOLD = 1024 * 1024;
+    var hasZstd = typeof zstdCompressSync === "function" && typeof zstdDecompressSync === "function";
     module2.exports = class SqliteCacheStore {
       #maxEntrySize = MAX_ENTRY_SIZE;
       #maxCount = Infinity;
+      #compressThreshold = COMPRESS_THRESHOLD;
       /**
        * @type {import('node:sqlite').DatabaseSync}
        */
@@ -50179,6 +54441,12 @@ var require_sqlite_cache_store = __commonJS({
             }
             this.#maxCount = opts.maxCount;
           }
+          if (opts.compressThreshold !== void 0) {
+            if (typeof opts.compressThreshold !== "number" || !Number.isInteger(opts.compressThreshold) || opts.compressThreshold < 0) {
+              throw new TypeError("SqliteCacheStore options.compressThreshold must be a non-negative integer");
+            }
+            this.#compressThreshold = opts.compressThreshold;
+          }
         }
         if (!DatabaseSync) {
           DatabaseSync = require("node:sqlite").DatabaseSync;
@@ -50198,6 +54466,7 @@ var require_sqlite_cache_store = __commonJS({
 
         -- Data returned to the interceptor
         body BUF NULL,
+        compressed TEXT NULL,
         deleteAt INTEGER NOT NULL,
         statusCode INTEGER NOT NULL,
         statusMessage TEXT NOT NULL,
@@ -50216,6 +54485,7 @@ var require_sqlite_cache_store = __commonJS({
       SELECT
         id,
         body,
+        compressed,
         deleteAt,
         statusCode,
         statusMessage,
@@ -50235,6 +54505,7 @@ var require_sqlite_cache_store = __commonJS({
         this.#updateValueQuery = this.#db.prepare(`
       UPDATE cacheInterceptorV${VERSION3} SET
         body = ?,
+        compressed = ?,
         deleteAt = ?,
         statusCode = ?,
         statusMessage = ?,
@@ -50252,6 +54523,7 @@ var require_sqlite_cache_store = __commonJS({
         url,
         method,
         body,
+        compressed,
         deleteAt,
         statusCode,
         statusMessage,
@@ -50261,7 +54533,7 @@ var require_sqlite_cache_store = __commonJS({
         vary,
         cachedAt,
         staleAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
         this.#deleteByUrlQuery = this.#db.prepare(
           `DELETE FROM cacheInterceptorV${VERSION3} WHERE url = ?`
@@ -50294,7 +54566,7 @@ var require_sqlite_cache_store = __commonJS({
         assertCacheKey(key);
         const value = this.#findValue(key);
         return value ? {
-          body: value.body ? Buffer.from(value.body.buffer, value.body.byteOffset, value.body.byteLength) : void 0,
+          body: value.body ? value.compressed === "zstd" ? zstdDecompressSync(Buffer.from(value.body.buffer, value.body.byteOffset, value.body.byteLength)) : Buffer.from(value.body.buffer, value.body.byteOffset, value.body.byteLength) : void 0,
           statusCode: value.statusCode,
           statusMessage: value.statusMessage,
           headers: value.headers ? JSON.parse(value.headers) : void 0,
@@ -50318,10 +54590,20 @@ var require_sqlite_cache_store = __commonJS({
         if (size && size > this.#maxEntrySize) {
           return;
         }
+        let compressed = null;
+        let storedBody = body;
+        if (body && hasZstd && (size > this.#compressThreshold || isCompressibleContentType(getContentType(value.headers)))) {
+          const candidate = zstdCompressSync(body);
+          if (candidate.byteLength < body.byteLength) {
+            storedBody = candidate;
+            compressed = "zstd";
+          }
+        }
         const existingValue = this.#findValue(key, true);
         if (existingValue) {
           this.#updateValueQuery.run(
-            body,
+            storedBody,
+            compressed,
             value.deleteAt,
             value.statusCode,
             value.statusMessage,
@@ -50337,7 +54619,8 @@ var require_sqlite_cache_store = __commonJS({
           this.#insertValueQuery.run(
             url2,
             key.method,
-            body,
+            storedBody,
+            compressed,
             value.deleteAt,
             value.statusCode,
             value.statusMessage,
@@ -50475,6 +54758,25 @@ var require_sqlite_cache_store = __commonJS({
       }
       return lhs === rhs;
     }
+    function getContentType(headers) {
+      if (headers == null) {
+        return void 0;
+      }
+      for (const key in headers) {
+        if (key.toLowerCase() === "content-type") {
+          const value = headers[key];
+          return Array.isArray(value) ? value[0] : value;
+        }
+      }
+      return void 0;
+    }
+    function isCompressibleContentType(contentType) {
+      if (contentType == null) {
+        return false;
+      }
+      const type = contentType.toLowerCase();
+      return /^text\//.test(type) || /^application\/(json|xml|javascript|x-www-form-urlencoded|graphql)(\s|;|$)/.test(type) || /\+(json|xml)(\s|;|$)/.test(type);
+    }
   }
 });
 
@@ -50483,7 +54785,7 @@ var require_headers2 = __commonJS({
   "node_modules/undici/lib/web/fetch/headers.js"(exports2, module2) {
     "use strict";
     var { kConstruct } = require_symbols6();
-    var { kEnumerableProperty } = require_util9();
+    var { kEnumerableProperty, setHeader } = require_util9();
     var {
       iteratorMixin,
       isValidHeaderName: isValidHeaderName2,
@@ -50672,7 +54974,7 @@ var require_headers2 = __commonJS({
         const headers = {};
         if (this.headersMap.size !== 0) {
           for (const { name, value } of this.headersMap.values()) {
-            headers[name] = value;
+            setHeader(headers, name, value);
           }
         }
         return headers;
@@ -50743,7 +55045,11 @@ var require_headers2 = __commonJS({
         }
       }
     };
-    var Headers2 = class _Headers {
+    var getHeadersGuard;
+    var setHeadersGuard;
+    var getHeadersList;
+    var setHeadersList;
+    var Headers2 = class {
       #guard;
       /**
        * @type {HeadersList}
@@ -50767,7 +55073,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-append
       append(name, value) {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         webidl.argumentLengthCheck(arguments, 2, "Headers.append");
         const prefix = "Headers.append";
         name = webidl.converters.ByteString(name, prefix, "name");
@@ -50776,7 +55082,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-delete
       delete(name) {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         webidl.argumentLengthCheck(arguments, 1, "Headers.delete");
         const prefix = "Headers.delete";
         name = webidl.converters.ByteString(name, prefix, "name");
@@ -50797,7 +55103,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-get
       get(name) {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         webidl.argumentLengthCheck(arguments, 1, "Headers.get");
         const prefix = "Headers.get";
         name = webidl.converters.ByteString(name, prefix, "name");
@@ -50812,7 +55118,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-has
       has(name) {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         webidl.argumentLengthCheck(arguments, 1, "Headers.has");
         const prefix = "Headers.has";
         name = webidl.converters.ByteString(name, prefix, "name");
@@ -50827,7 +55133,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-set
       set(name, value) {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         webidl.argumentLengthCheck(arguments, 2, "Headers.set");
         const prefix = "Headers.set";
         name = webidl.converters.ByteString(name, prefix, "name");
@@ -50853,7 +55159,7 @@ var require_headers2 = __commonJS({
       }
       // https://fetch.spec.whatwg.org/#dom-headers-getsetcookie
       getSetCookie() {
-        webidl.brandCheck(this, _Headers);
+        webidl.brandCheck(this, webidl.is.Headers);
         const list = this.#headersList.cookies;
         if (list) {
           return [...list];
@@ -50864,32 +55170,21 @@ var require_headers2 = __commonJS({
         options.depth ??= depth;
         return `Headers ${util4.formatWithOptions(options, this.#headersList.entries)}`;
       }
-      static getHeadersGuard(o) {
-        return o.#guard;
-      }
-      static setHeadersGuard(o, guard) {
-        o.#guard = guard;
-      }
-      /**
-       * @param {Headers} o
-       */
-      static getHeadersList(o) {
-        return o.#headersList;
-      }
-      /**
-       * @param {Headers} target
-       * @param {HeadersList} list
-       */
-      static setHeadersList(target, list) {
-        target.#headersList = list;
+      static {
+        getHeadersGuard = (headers) => headers.#guard;
+        setHeadersGuard = (headers, guard) => {
+          headers.#guard = guard;
+        };
+        getHeadersList = (headers) => headers.#headersList;
+        setHeadersList = (target, list) => {
+          target.#headersList = list;
+        };
+        webidl.is.Headers = (arg) => {
+          return arg != null && typeof arg === "object" && #guard in arg;
+        };
       }
     };
-    var { getHeadersGuard, setHeadersGuard, getHeadersList, setHeadersList } = Headers2;
-    Reflect.deleteProperty(Headers2, "getHeadersGuard");
-    Reflect.deleteProperty(Headers2, "setHeadersGuard");
-    Reflect.deleteProperty(Headers2, "getHeadersList");
-    Reflect.deleteProperty(Headers2, "setHeadersList");
-    iteratorMixin("Headers", Headers2, headersListSortAndCombine, 0, 1);
+    iteratorMixin("Headers", Headers2, headersListSortAndCombine, 0, 1, webidl.is.Headers);
     Object.defineProperties(Headers2.prototype, {
       append: kEnumerableProperty,
       delete: kEnumerableProperty,
@@ -50958,14 +55253,18 @@ var require_response2 = __commonJS({
     var {
       redirectStatusSet,
       nullBodyStatus
-    } = require_constants8();
+    } = require_constants7();
     var { webidl } = require_webidl2();
     var { URLSerializer } = require_data_url2();
     var { kConstruct } = require_symbols6();
     var assert = require("node:assert");
     var { isomorphicEncode, serializeJavascriptValueToJSONString } = require_infra();
     var textEncoder2 = new TextEncoder("utf-8");
-    var Response = class _Response {
+    var getResponseHeaders;
+    var setResponseHeaders;
+    var getResponseState;
+    var setResponseState;
+    var Response = class {
       /** @type {Headers} */
       #headers;
       #state;
@@ -51029,12 +55328,12 @@ var require_response2 = __commonJS({
       }
       // Returns response’s type, e.g., "cors".
       get type() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.type;
       }
       // Returns response’s URL, if it has one; otherwise the empty string.
       get url() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         const urlList = this.#state.urlList;
         const url2 = urlList[urlList.length - 1] ?? null;
         if (url2 === null) {
@@ -51044,40 +55343,40 @@ var require_response2 = __commonJS({
       }
       // Returns whether response was obtained through a redirect.
       get redirected() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.urlList.length > 1;
       }
       // Returns response’s status.
       get status() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.status;
       }
       // Returns whether response’s status is an ok status.
       get ok() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.status >= 200 && this.#state.status <= 299;
       }
       // Returns response’s status message.
       get statusText() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.statusText;
       }
       // Returns response’s headers as Headers.
       get headers() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#headers;
       }
       get body() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return this.#state.body ? this.#state.body.stream : null;
       }
       get bodyUsed() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         return !!this.#state.body && util4.isDisturbed(this.#state.body.stream);
       }
       // Returns a clone of response.
       clone() {
-        webidl.brandCheck(this, _Response);
+        webidl.brandCheck(this, webidl.is.Response);
         if (bodyUnusable(this.#state)) {
           throw webidl.errors.exception({
             header: "Response.clone",
@@ -51108,39 +55407,25 @@ var require_response2 = __commonJS({
         };
         return `Response ${nodeUtil.formatWithOptions(options, properties)}`;
       }
-      /**
-       * @param {Response} response
-       */
-      static getResponseHeaders(response) {
-        return response.#headers;
-      }
-      /**
-       * @param {Response} response
-       * @param {Headers} newHeaders
-       */
-      static setResponseHeaders(response, newHeaders) {
-        response.#headers = newHeaders;
-      }
-      /**
-       * @param {Response} response
-       */
-      static getResponseState(response) {
-        return response.#state;
-      }
-      /**
-       * @param {Response} response
-       * @param {any} newState
-       */
-      static setResponseState(response, newState) {
-        response.#state = newState;
+      static {
+        getResponseHeaders = (response) => {
+          return response.#headers;
+        };
+        setResponseHeaders = (response, newHeaders) => {
+          response.#headers = newHeaders;
+        };
+        getResponseState = (response) => {
+          return response.#state;
+        };
+        setResponseState = (response, newState) => {
+          response.#state = newState;
+        };
+        webidl.is.Response = (arg) => {
+          return arg != null && typeof arg === "object" && #state in arg;
+        };
       }
     };
-    var { getResponseHeaders, setResponseHeaders, getResponseState, setResponseState } = Response;
-    Reflect.deleteProperty(Response, "getResponseHeaders");
-    Reflect.deleteProperty(Response, "setResponseHeaders");
-    Reflect.deleteProperty(Response, "getResponseState");
-    Reflect.deleteProperty(Response, "setResponseState");
-    mixinBody(Response, getResponseState);
+    mixinBody(Response, getResponseState, webidl.is.Response);
     Object.defineProperties(Response.prototype, {
       type: kEnumerableProperty,
       url: kEnumerableProperty,
@@ -51344,7 +55629,6 @@ var require_response2 = __commonJS({
         converter: webidl.converters.HeadersInit
       }
     ]);
-    webidl.is.Response = webidl.util.MakeTypeAssertion(Response);
     module2.exports = {
       isNetworkError,
       makeNetworkError,
@@ -51381,7 +55665,7 @@ var require_request4 = __commonJS({
       requestCredentials,
       requestCache,
       requestDuplex
-    } = require_constants8();
+    } = require_constants7();
     var { kEnumerableProperty, normalizedMethodRecordsBase, normalizedMethodRecords } = util4;
     var { webidl } = require_webidl2();
     var { URLSerializer } = require_data_url2();
@@ -51424,7 +55708,14 @@ var require_request4 = __commonJS({
       }
     }
     var patchMethodWarning = false;
-    var Request = class _Request {
+    var setRequestSignal;
+    var getRequestDispatcher;
+    var setRequestDispatcher;
+    var setRequestHeaders;
+    var getRequestState;
+    var setRequestState;
+    var removeRequestAbortListener;
+    var Request = class {
       /** @type {AbortSignal} */
       #signal;
       /** @type {import('../../dispatcher/dispatcher')} */
@@ -51714,25 +56005,25 @@ var require_request4 = __commonJS({
       }
       // Returns request’s HTTP method, which is "GET" by default.
       get method() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.method;
       }
       // Returns the URL of request as a string.
       get url() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return URLSerializer(this.#state.url);
       }
       // Returns a Headers object consisting of the headers associated with request.
       // Note that headers added in the network layer by the user agent will not
       // be accounted for in this object, e.g., the "Host" header.
       get headers() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#headers;
       }
       // Returns the kind of resource requested by request, e.g., "document"
       // or "script".
       get destination() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.destination;
       }
       // Returns the referrer of request. Its value can be a same-origin URL if
@@ -51741,7 +56032,7 @@ var require_request4 = __commonJS({
       // during fetching to determine the value of the `Referer` header of the
       // request being made.
       get referrer() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         if (this.#state.referrer === "no-referrer") {
           return "";
         }
@@ -51754,28 +56045,28 @@ var require_request4 = __commonJS({
       // This is used during fetching to compute the value of the request’s
       // referrer.
       get referrerPolicy() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.referrerPolicy;
       }
       // Returns the mode associated with request, which is a string indicating
       // whether the request will use CORS, or will be restricted to same-origin
       // URLs.
       get mode() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.mode;
       }
       // Returns the credentials mode associated with request,
       // which is a string indicating whether credentials will be sent with the
       // request always, never, or only when sent to a same-origin URL.
       get credentials() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.credentials;
       }
       // Returns the cache mode associated with request,
       // which is a string indicating how the request will
       // interact with the browser’s cache when fetching.
       get cache() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.cache;
       }
       // Returns the redirect mode associated with request,
@@ -51783,56 +56074,56 @@ var require_request4 = __commonJS({
       // request will be handled during fetching. A request
       // will follow redirects by default.
       get redirect() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.redirect;
       }
       // Returns request’s subresource integrity metadata, which is a
       // cryptographic hash of the resource being fetched. Its value
       // consists of multiple hashes separated by whitespace. [SRI]
       get integrity() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.integrity;
       }
       // Returns a boolean indicating whether or not request can outlive the
       // global in which it was created.
       get keepalive() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.keepalive;
       }
       // Returns a boolean indicating whether or not request is for a reload
       // navigation.
       get isReloadNavigation() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.reloadNavigation;
       }
       // Returns a boolean indicating whether or not request is for a history
       // navigation (a.k.a. back-forward navigation).
       get isHistoryNavigation() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.historyNavigation;
       }
       // Returns the signal associated with request, which is an AbortSignal
       // object indicating whether or not request has been aborted, and its
       // abort event handler.
       get signal() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#signal;
       }
       get body() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return this.#state.body ? this.#state.body.stream : null;
       }
       get bodyUsed() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return !!this.#state.body && util4.isDisturbed(this.#state.body.stream);
       }
       get duplex() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         return "half";
       }
       // Returns a clone of request.
       clone() {
-        webidl.brandCheck(this, _Request);
+        webidl.brandCheck(this, webidl.is.Request);
         if (bodyUnusable(this.#state)) {
           throw new TypeError("unusable");
         }
@@ -51879,65 +56170,34 @@ var require_request4 = __commonJS({
         };
         return `Request ${nodeUtil.formatWithOptions(options, properties)}`;
       }
-      /**
-       * @param {Request} request
-       * @param {AbortSignal} newSignal
-       */
-      static setRequestSignal(request, newSignal) {
-        request.#signal = newSignal;
-        return request;
-      }
-      /**
-       * @param {Request} request
-       */
-      static getRequestDispatcher(request) {
-        return request.#dispatcher;
-      }
-      /**
-       * @param {Request} request
-       * @param {import('../../dispatcher/dispatcher')} newDispatcher
-       */
-      static setRequestDispatcher(request, newDispatcher) {
-        request.#dispatcher = newDispatcher;
-      }
-      /**
-       * @param {Request} request
-       * @param {Headers} newHeaders
-       */
-      static setRequestHeaders(request, newHeaders) {
-        request.#headers = newHeaders;
-      }
-      /**
-       * @param {Request} request
-       */
-      static getRequestState(request) {
-        return request.#state;
-      }
-      /**
-       * @param {Request} request
-       * @param {any} newState
-       */
-      static setRequestState(request, newState) {
-        request.#state = newState;
-      }
-      /**
-       * Removes the `abort` listener that makes this request's signal follow the
-       * signal passed to its constructor, if any. Idempotent.
-       * @param {Request} request
-       */
-      static removeRequestAbortListener(request) {
-        request.#abortCleanup?.();
+      static {
+        setRequestSignal = (request, newSignal) => {
+          request.#signal = newSignal;
+        };
+        getRequestDispatcher = (request) => {
+          return request.#dispatcher;
+        };
+        setRequestDispatcher = (request, newDispatcher) => {
+          request.#dispatcher = newDispatcher;
+        };
+        setRequestHeaders = (request, newHeaders) => {
+          request.#headers = newHeaders;
+        };
+        getRequestState = (request) => {
+          return request.#state;
+        };
+        setRequestState = (request, newState) => {
+          request.#state = newState;
+        };
+        removeRequestAbortListener = (request) => {
+          request.#abortCleanup?.();
+        };
+        webidl.is.Request = (arg) => {
+          return arg != null && typeof arg === "object" && #state in arg;
+        };
       }
     };
-    var { setRequestSignal, getRequestDispatcher, setRequestDispatcher, setRequestHeaders, getRequestState, setRequestState, removeRequestAbortListener } = Request;
-    Reflect.deleteProperty(Request, "setRequestSignal");
-    Reflect.deleteProperty(Request, "getRequestDispatcher");
-    Reflect.deleteProperty(Request, "setRequestDispatcher");
-    Reflect.deleteProperty(Request, "setRequestHeaders");
-    Reflect.deleteProperty(Request, "getRequestState");
-    Reflect.deleteProperty(Request, "setRequestState");
-    Reflect.deleteProperty(Request, "removeRequestAbortListener");
-    mixinBody(Request, getRequestState);
+    mixinBody(Request, getRequestState, webidl.is.Request);
     function makeRequest2(init) {
       return {
         method: init.method ?? "GET",
@@ -51952,7 +56212,7 @@ var require_request4 = __commonJS({
         serviceWorkers: init.serviceWorkers ?? "all",
         initiator: init.initiator ?? "",
         destination: init.destination ?? "",
-        priority: init.priority ?? null,
+        priority: init.priority ?? "auto",
         origin: init.origin ?? "client",
         policyContainer: init.policyContainer ?? "client",
         referrer: init.referrer ?? "client",
@@ -52027,7 +56287,6 @@ var require_request4 = __commonJS({
         configurable: true
       }
     });
-    webidl.is.Request = webidl.util.MakeTypeAssertion(Request);
     webidl.converters.RequestInfo = function(V3) {
       if (typeof V3 === "string") {
         return webidl.converters.USVString(V3);
@@ -52121,8 +56380,7 @@ var require_request4 = __commonJS({
       {
         key: "priority",
         converter: webidl.converters.DOMString,
-        allowedValues: ["high", "low", "auto"],
-        defaultValue: () => "auto"
+        allowedValues: ["high", "low", "auto"]
       }
     ]);
     module2.exports = {
@@ -52143,6 +56401,7 @@ var require_subresource_integrity = __commonJS({
     "use strict";
     var assert = require("node:assert");
     var { runtimeFeatures } = require_runtime_features();
+    var { asciiLowercase } = require_infra();
     var validSRIHashAlgorithmTokenSet = /* @__PURE__ */ new Map([["sha256", 0], ["sha384", 1], ["sha512", 2]]);
     var crypto3;
     if (runtimeFeatures.has("crypto")) {
@@ -52165,10 +56424,7 @@ var require_subresource_integrity = __commonJS({
         validSRIHashAlgorithmTokenSet
       )
     );
-    var isValidSRIHashAlgorithm = (
-      /** @type {IsValidSRIHashAlgorithm} */
-      Map.prototype.has.bind(validSRIHashAlgorithmTokenSet)
-    );
+    var isValidSRIHashAlgorithm = (algorithm) => validSRIHashAlgorithmTokenSet.has(asciiLowercase(algorithm));
     var bytesMatch = runtimeFeatures.has("crypto") === false || validSRIHashAlgorithmTokenSet.size === 0 ? () => true : (bytes, metadataList) => {
       const parsedMetadata = parseMetadata(metadataList);
       if (parsedMetadata.length === 0) {
@@ -52229,7 +56485,8 @@ var require_subresource_integrity = __commonJS({
           base64Value = algorithmAndValue[1];
         }
         const metadata2 = {
-          alg: algorithm,
+          // Possible spec bug?
+          alg: asciiLowercase(algorithm),
           val: base64Value
         };
         result.push(metadata2);
@@ -52333,10 +56590,11 @@ var require_fetch2 = __commonJS({
       safeMethodsSet,
       requestBodyHeader,
       subresourceSet
-    } = require_constants8();
+    } = require_constants7();
     var EE = require("node:events");
     var { Readable: Readable5, pipeline, finished, isErrored, isReadable } = require("node:stream");
     var { addAbortListener, bufferToLowerCasedHeaderName } = require_util9();
+    var { SocketError } = require_errors2();
     var { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require_data_url2();
     var { getGlobalDispatcher } = require_global4();
     var { webidl } = require_webidl2();
@@ -52696,7 +56954,7 @@ var require_fetch2 = __commonJS({
       }
     }
     function schemeFetch(fetchParams) {
-      if (isCancelled(fetchParams) && fetchParams.request.redirectCount === 0) {
+      if (isCancelled(fetchParams)) {
         return Promise.resolve(makeAppropriateNetworkError(fetchParams));
       }
       const { request } = fetchParams;
@@ -52794,11 +57052,11 @@ var require_fetch2 = __commonJS({
     }
     function fetchFinale(fetchParams, response) {
       let timingInfo = fetchParams.timingInfo;
+      if (fetchParams.request.destination === "document") {
+        fetchParams.controller.fullTimingInfo = timingInfo;
+      }
       const processResponseEndOfBody = () => {
         const unsafeEndTime = Date.now();
-        if (fetchParams.request.destination === "document") {
-          fetchParams.controller.fullTimingInfo = timingInfo;
-        }
         fetchParams.controller.reportTimingSteps = () => {
           if (!urlIsHttpHttpsScheme(fetchParams.request.url)) {
             return;
@@ -52847,6 +57105,15 @@ var require_fetch2 = __commonJS({
           processResponseEndOfBody();
         });
       }
+      if (fetchParams.processResponseConsumeBody != null) {
+        const processBody = (nullOrBytes) => fetchParams.processResponseConsumeBody(response, nullOrBytes);
+        const processBodyError = () => fetchParams.processResponseConsumeBody(response, "failure");
+        if (internalResponse.body == null) {
+          queueMicrotask(() => processBody(null));
+        } else {
+          fullyReadBody(internalResponse.body, processBody, processBodyError);
+        }
+      }
     }
     async function httpFetch(fetchParams) {
       const request = fetchParams.request;
@@ -52877,7 +57144,7 @@ var require_fetch2 = __commonJS({
       }
       if (redirectStatusSet.has(actualResponse.status)) {
         if (request.redirect !== "manual") {
-          fetchParams.controller.connection.destroy(void 0, false);
+          fetchParams.controller.connection.destroy();
         }
         if (request.redirect === "error") {
           response = makeNetworkError("unexpected redirect");
@@ -53108,12 +57375,10 @@ var require_fetch2 = __commonJS({
       fetchParams.controller.connection = {
         abort: null,
         destroyed: false,
-        destroy(err, abort = true) {
+        destroy(err) {
           if (!this.destroyed) {
             this.destroyed = true;
-            if (abort) {
-              this.abort?.(err ?? new DOMException("The operation was aborted.", "AbortError"));
-            }
+            this.abort?.(err ?? new DOMException("The operation was aborted.", "AbortError"));
           }
         }
       };
@@ -53311,7 +57576,6 @@ var require_fetch2 = __commonJS({
                 const headersList = new HeadersList();
                 appendHeadersListFromResponseHeaders(headersList, headers, rawHeaders);
                 const location = headersList.get("location", true);
-                this.body = new Readable5({ read: () => controller.resume() });
                 const willFollow = location && request.redirect === "follow" && redirectStatusSet.has(status);
                 const decoders = [];
                 if (request.method !== "HEAD" && request.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -53319,7 +57583,7 @@ var require_fetch2 = __commonJS({
                   const codings = contentEncoding ? contentEncoding.toLowerCase().split(",") : [];
                   const maxContentEncodings = 5;
                   if (codings.length > maxContentEncodings) {
-                    reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+                    controller.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
                     return;
                   }
                   for (let i = codings.length - 1; i >= 0; --i) {
@@ -53346,7 +57610,11 @@ var require_fetch2 = __commonJS({
                     } else if (coding === "zstd") {
                       decoders.push(zlib2.createZstdDecompress({
                         flush: zlib2.constants.ZSTD_e_continue,
-                        finishFlush: zlib2.constants.ZSTD_e_end
+                        finishFlush: zlib2.constants.ZSTD_e_end,
+                        params: {
+                          // https://www.rfc-editor.org/rfc/rfc9659.html#section-3
+                          [zlib2.constants.ZSTD_d_windowLogMax]: 23
+                        }
                       }));
                     } else {
                       decoders.length = 0;
@@ -53354,6 +57622,7 @@ var require_fetch2 = __commonJS({
                     }
                   }
                 }
+                this.body = new Readable5({ read: () => controller.resume() });
                 const onError = (err) => this.onResponseError(controller, err);
                 resolve({
                   status,
@@ -53383,7 +57652,7 @@ var require_fetch2 = __commonJS({
                 fetchParams.controller.ended = true;
                 this.body?.push(null);
               },
-              onResponseError(_controller, error2) {
+              onResponseError(controller, error2) {
                 if (this.abort) {
                   fetchParams.controller.off("terminated", this.abort);
                 }
@@ -53392,11 +57661,16 @@ var require_fetch2 = __commonJS({
                   return;
                 }
                 this.body?.destroy(error2);
-                fetchParams.controller.terminate(error2);
+                if (!controller?.aborted) {
+                  fetchParams.controller.terminate(error2);
+                }
                 reject(error2);
               },
               onRequestUpgrade(controller, status, headers, socket) {
                 if (socket.session != null && status !== 200 || socket.session == null && status !== 101) {
+                  if (socket.session != null) {
+                    controller.abort(new SocketError("bad upgrade", null));
+                  }
                   return false;
                 }
                 const rawHeaders = controller?.rawHeaders ?? [];
@@ -53467,7 +57741,7 @@ var require_cache4 = __commonJS({
     var { Request, fromInnerRequest, getRequestState } = require_request4();
     var { fetching } = require_fetch2();
     var { urlIsHttpHttpsScheme, readAllBytes } = require_util10();
-    var Cache = class _Cache {
+    var Cache = class {
       /**
        * @see https://w3c.github.io/ServiceWorker/#dfn-relevant-request-response-list
        * @type {requestResponseList}
@@ -53481,7 +57755,7 @@ var require_cache4 = __commonJS({
         this.#relevantRequestResponseList = arguments[1];
       }
       async match(request, options = {}) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.match";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         request = webidl.converters.RequestInfo(request);
@@ -53493,14 +57767,14 @@ var require_cache4 = __commonJS({
         return p[0];
       }
       async matchAll(request = void 0, options = {}) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.matchAll";
         if (request !== void 0) request = webidl.converters.RequestInfo(request);
         options = webidl.converters.CacheQueryOptions(options, prefix, "options");
         return this.#internalMatchAll(request, options);
       }
       async add(request) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.add";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         request = webidl.converters.RequestInfo(request);
@@ -53509,7 +57783,7 @@ var require_cache4 = __commonJS({
         return await responseArrayPromise;
       }
       async addAll(requests) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.addAll";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         const responsePromises = [];
@@ -53571,7 +57845,10 @@ var require_cache4 = __commonJS({
                 }
               }
             },
-            processResponseEndOfBody(response) {
+            // Possible spec bug. If the body is never read, `processResponseEndOfBody` (which is attached to a TransformStream's flush hook)
+            // never runs, so this would hang. This hook, on the other hand, always reads the body.
+            // https://github.com/nodejs/undici/issues/5615
+            processResponseConsumeBody(response) {
               if (response.aborted) {
                 responsePromise.reject(new DOMException("aborted", "AbortError"));
                 return;
@@ -53614,7 +57891,7 @@ var require_cache4 = __commonJS({
         return cacheJobPromise.promise;
       }
       async put(request, response) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.put";
         webidl.argumentLengthCheck(arguments, 2, prefix);
         request = webidl.converters.RequestInfo(request);
@@ -53695,7 +57972,7 @@ var require_cache4 = __commonJS({
         return cacheJobPromise.promise;
       }
       async delete(request, options = {}) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.delete";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         request = webidl.converters.RequestInfo(request);
@@ -53741,7 +58018,7 @@ var require_cache4 = __commonJS({
        * @returns {Promise<readonly Request[]>}
        */
       async keys(request = void 0, options = {}) {
-        webidl.brandCheck(this, _Cache);
+        webidl.brandCheck(this, webidl.is.Cache);
         const prefix = "Cache.keys";
         if (request !== void 0) request = webidl.converters.RequestInfo(request);
         options = webidl.converters.CacheQueryOptions(options, prefix, "options");
@@ -53950,6 +58227,11 @@ var require_cache4 = __commonJS({
         }
         return Object.freeze(responseList);
       }
+      static {
+        webidl.is.Cache = (arg) => {
+          return arg != null && typeof arg === "object" && #relevantRequestResponseList in arg;
+        };
+      }
     };
     Object.defineProperties(Cache.prototype, {
       [Symbol.toStringTag]: {
@@ -54010,7 +58292,7 @@ var require_cachestorage2 = __commonJS({
     var { webidl } = require_webidl2();
     var { kEnumerableProperty } = require_util9();
     var { kConstruct } = require_symbols6();
-    var CacheStorage = class _CacheStorage {
+    var CacheStorage = class {
       /**
        * @see https://w3c.github.io/ServiceWorker/#dfn-relevant-name-to-cache-map
        * @type {Map<string, import('./cache').requestResponseList}
@@ -54023,7 +58305,7 @@ var require_cachestorage2 = __commonJS({
         webidl.util.markAsUncloneable(this);
       }
       async match(request, options = {}) {
-        webidl.brandCheck(this, _CacheStorage);
+        webidl.brandCheck(this, webidl.is.CacheStorage);
         webidl.argumentLengthCheck(arguments, 1, "CacheStorage.match");
         request = webidl.converters.RequestInfo(request);
         options = webidl.converters.MultiCacheQueryOptions(options);
@@ -54049,7 +58331,7 @@ var require_cachestorage2 = __commonJS({
        * @returns {Promise<boolean>}
        */
       async has(cacheName) {
-        webidl.brandCheck(this, _CacheStorage);
+        webidl.brandCheck(this, webidl.is.CacheStorage);
         const prefix = "CacheStorage.has";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         cacheName = webidl.converters.DOMString(cacheName, prefix, "cacheName");
@@ -54061,7 +58343,7 @@ var require_cachestorage2 = __commonJS({
        * @returns {Promise<Cache>}
        */
       async open(cacheName) {
-        webidl.brandCheck(this, _CacheStorage);
+        webidl.brandCheck(this, webidl.is.CacheStorage);
         const prefix = "CacheStorage.open";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         cacheName = webidl.converters.DOMString(cacheName, prefix, "cacheName");
@@ -54079,7 +58361,7 @@ var require_cachestorage2 = __commonJS({
        * @returns {Promise<boolean>}
        */
       async delete(cacheName) {
-        webidl.brandCheck(this, _CacheStorage);
+        webidl.brandCheck(this, webidl.is.CacheStorage);
         const prefix = "CacheStorage.delete";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         cacheName = webidl.converters.DOMString(cacheName, prefix, "cacheName");
@@ -54090,9 +58372,14 @@ var require_cachestorage2 = __commonJS({
        * @returns {Promise<string[]>}
        */
       async keys() {
-        webidl.brandCheck(this, _CacheStorage);
+        webidl.brandCheck(this, webidl.is.CacheStorage);
         const keys = this.#caches.keys();
         return [...keys];
+      }
+      static {
+        webidl.is.CacheStorage = (arg) => {
+          return arg != null && typeof arg === "object" && #caches in arg;
+        };
       }
     };
     Object.defineProperties(CacheStorage.prototype, {
@@ -54303,8 +58590,12 @@ var require_util12 = __commonJS({
         validateCookiePath(cookie.path);
         out.push(`Path=${cookie.path}`);
       }
-      if (cookie.expires && cookie.expires.toString() !== "Invalid Date") {
-        out.push(`Expires=${toIMFDate(cookie.expires)}`);
+      if (cookie.expires != null) {
+        const expiresMs = cookie.expires instanceof Date ? cookie.expires.getTime() : cookie.expires;
+        const maxTimeValue = 864e13;
+        if (typeof expiresMs === "number" && Number.isFinite(expiresMs) && Math.abs(expiresMs) <= maxTimeValue) {
+          out.push(`Expires=${toIMFDate(cookie.expires)}`);
+        }
       }
       if (cookie.sameSite) {
         out.push(`SameSite=${cookie.sameSite}`);
@@ -54379,90 +58670,93 @@ var require_parse2 = __commonJS({
       };
     }
     function parseUnparsedAttributes(unparsedAttributes, cookieAttributeList = {}) {
-      if (unparsedAttributes.length === 0) {
-        return cookieAttributeList;
-      }
-      assert(unparsedAttributes[0] === ";");
-      unparsedAttributes = unparsedAttributes.slice(1);
-      let cookieAv = "";
-      if (unparsedAttributes.includes(";")) {
-        cookieAv = collectASequenceOfCodePointsFast(
-          ";",
-          unparsedAttributes,
-          { position: 0 }
-        );
-        unparsedAttributes = unparsedAttributes.slice(cookieAv.length);
-      } else {
-        cookieAv = unparsedAttributes;
-        unparsedAttributes = "";
-      }
-      let attributeName = "";
-      let attributeValue = "";
-      if (cookieAv.includes("=")) {
-        const position = { position: 0 };
-        attributeName = collectASequenceOfCodePointsFast(
-          "=",
-          cookieAv,
-          position
-        );
-        attributeValue = cookieAv.slice(position.position + 1);
-      } else {
-        attributeName = cookieAv;
-      }
-      attributeName = attributeName.trim();
-      attributeValue = attributeValue.trim();
-      if (attributeValue.length > maxAttributeValueSize) {
-        return parseUnparsedAttributes(unparsedAttributes, cookieAttributeList);
-      }
-      const attributeNameLowercase = attributeName.toLowerCase();
-      if (attributeNameLowercase === "expires") {
-        const expiryTime = new Date(attributeValue);
-        if (!Number.isNaN(expiryTime.getTime())) {
-          cookieAttributeList.expires = expiryTime;
+      while (true) {
+        if (unparsedAttributes.length === 0) {
+          return cookieAttributeList;
         }
-      } else if (attributeNameLowercase === "max-age") {
-        const charCode = attributeValue.charCodeAt(0);
-        if ((charCode < 48 || charCode > 57) && attributeValue[0] !== "-") {
-          return parseUnparsedAttributes(unparsedAttributes, cookieAttributeList);
-        }
-        if (!/^\d+$/.test(attributeValue)) {
-          return parseUnparsedAttributes(unparsedAttributes, cookieAttributeList);
-        }
-        const deltaSeconds = Number(attributeValue);
-        cookieAttributeList.maxAge = deltaSeconds;
-      } else if (attributeNameLowercase === "domain") {
-        let cookieDomain = attributeValue;
-        if (cookieDomain[0] === ".") {
-          cookieDomain = cookieDomain.slice(1);
-        }
-        cookieDomain = cookieDomain.toLowerCase();
-        cookieAttributeList.domain = cookieDomain;
-      } else if (attributeNameLowercase === "path") {
-        let cookiePath = "";
-        if (attributeValue.length === 0 || attributeValue[0] !== "/") {
-          cookiePath = "/";
+        assert(unparsedAttributes[0] === ";");
+        unparsedAttributes = unparsedAttributes.slice(1);
+        let cookieAv = "";
+        if (unparsedAttributes.includes(";")) {
+          cookieAv = collectASequenceOfCodePointsFast(
+            ";",
+            unparsedAttributes,
+            { position: 0 }
+          );
+          unparsedAttributes = unparsedAttributes.slice(cookieAv.length);
         } else {
-          cookiePath = attributeValue;
+          cookieAv = unparsedAttributes;
+          unparsedAttributes = "";
         }
-        cookieAttributeList.path = cookiePath;
-      } else if (attributeNameLowercase === "secure") {
-        cookieAttributeList.secure = true;
-      } else if (attributeNameLowercase === "httponly") {
-        cookieAttributeList.httpOnly = true;
-      } else if (attributeNameLowercase === "samesite") {
-        const attributeValueLowercase = attributeValue.toLowerCase();
-        if (attributeValueLowercase === "none") {
-          cookieAttributeList.sameSite = "None";
-        } else if (attributeValueLowercase === "strict") {
-          cookieAttributeList.sameSite = "Strict";
-        } else if (attributeValueLowercase === "lax") {
-          cookieAttributeList.sameSite = "Lax";
+        let attributeName = "";
+        let attributeValue = "";
+        if (cookieAv.includes("=")) {
+          const position = { position: 0 };
+          attributeName = collectASequenceOfCodePointsFast(
+            "=",
+            cookieAv,
+            position
+          );
+          attributeValue = cookieAv.slice(position.position + 1);
+        } else {
+          attributeName = cookieAv;
         }
-      } else {
-        cookieAttributeList.unparsed ??= [];
-        cookieAttributeList.unparsed.push(`${attributeName}=${attributeValue}`);
+        attributeName = attributeName.trim();
+        attributeValue = attributeValue.trim();
+        if (attributeValue.length > maxAttributeValueSize) {
+          continue;
+        }
+        const attributeNameLowercase = attributeName.toLowerCase();
+        if (attributeNameLowercase === "expires") {
+          const expiryTime = new Date(attributeValue);
+          if (!Number.isNaN(expiryTime.getTime())) {
+            cookieAttributeList.expires = expiryTime;
+          }
+        } else if (attributeNameLowercase === "max-age") {
+          const charCode = attributeValue.charCodeAt(0);
+          const startsWithDigit = charCode >= 48 && charCode <= 57;
+          const startsWithSignedDigit = attributeValue[0] === "-" && attributeValue.length > 1;
+          if (!startsWithDigit && !startsWithSignedDigit) {
+            continue;
+          }
+          if (/[^\d]/.test(attributeValue.slice(1))) {
+            continue;
+          }
+          const deltaSeconds = Number(attributeValue);
+          cookieAttributeList.maxAge = deltaSeconds;
+        } else if (attributeNameLowercase === "domain") {
+          let cookieDomain = attributeValue;
+          if (cookieDomain[0] === ".") {
+            cookieDomain = cookieDomain.slice(1);
+          }
+          cookieDomain = cookieDomain.toLowerCase();
+          cookieAttributeList.domain = cookieDomain;
+        } else if (attributeNameLowercase === "path") {
+          let cookiePath = "";
+          if (attributeValue.length === 0 || attributeValue[0] !== "/") {
+            cookiePath = "/";
+          } else {
+            cookiePath = attributeValue;
+          }
+          cookieAttributeList.path = cookiePath;
+        } else if (attributeNameLowercase === "secure") {
+          cookieAttributeList.secure = true;
+        } else if (attributeNameLowercase === "httponly") {
+          cookieAttributeList.httpOnly = true;
+        } else if (attributeNameLowercase === "samesite") {
+          const attributeValueLowercase = attributeValue.toLowerCase();
+          if (attributeValueLowercase === "none") {
+            cookieAttributeList.sameSite = "None";
+          } else if (attributeValueLowercase === "strict") {
+            cookieAttributeList.sameSite = "Strict";
+          } else if (attributeValueLowercase === "lax") {
+            cookieAttributeList.sameSite = "Lax";
+          }
+        } else {
+          cookieAttributeList.unparsed ??= [];
+          cookieAttributeList.unparsed.push(`${attributeName}=${attributeValue}`);
+        }
       }
-      return parseUnparsedAttributes(unparsedAttributes, cookieAttributeList);
     }
     module2.exports = {
       parseSetCookie,
@@ -54478,13 +58772,21 @@ var require_cookies2 = __commonJS({
     var { parseSetCookie } = require_parse2();
     var { stringify } = require_util12();
     var { webidl } = require_webidl2();
-    var { Headers: Headers2 } = require_headers2();
-    var brandChecks = webidl.brandCheckMultiple([Headers2, globalThis.Headers].filter(Boolean));
+    var globalHeadersBrandCheck = (arg) => webidl.brandCheck(arg, webidl.util.MakeTypeAssertion(globalThis.Headers));
+    var undiciHeadersBrandCheck = (arg) => webidl.brandCheck(arg, webidl.is.Headers);
+    function brandCheckHeaders(arg) {
+      try {
+        undiciHeadersBrandCheck(arg);
+        return;
+      } catch {
+      }
+      globalHeadersBrandCheck(arg);
+    }
     function getCookies(headers) {
       webidl.argumentLengthCheck(arguments, 1, "getCookies");
-      brandChecks(headers);
+      brandCheckHeaders(headers);
       const cookie = headers.get("cookie");
-      const out = {};
+      const out = { __proto__: null };
       if (!cookie) {
         return out;
       }
@@ -54495,7 +58797,7 @@ var require_cookies2 = __commonJS({
       return out;
     }
     function deleteCookie(headers, name, attributes) {
-      brandChecks(headers);
+      brandCheckHeaders(headers);
       const prefix = "deleteCookie";
       webidl.argumentLengthCheck(arguments, 2, prefix);
       name = webidl.converters.DOMString(name, prefix, "name");
@@ -54509,7 +58811,7 @@ var require_cookies2 = __commonJS({
     }
     function getSetCookies(headers) {
       webidl.argumentLengthCheck(arguments, 1, "getSetCookies");
-      brandChecks(headers);
+      brandCheckHeaders(headers);
       const cookies = headers.getSetCookie();
       if (!cookies) {
         return [];
@@ -54522,7 +58824,7 @@ var require_cookies2 = __commonJS({
     }
     function setCookie(headers, cookie) {
       webidl.argumentLengthCheck(arguments, 2, "setCookie");
-      brandChecks(headers);
+      brandCheckHeaders(headers);
       cookie = webidl.converters.Cookie(cookie);
       const str = stringify(cookie);
       if (str) {
@@ -54613,6 +58915,7 @@ var require_events2 = __commonJS({
     var { webidl } = require_webidl2();
     var { kEnumerableProperty } = require_util9();
     var { kConstruct } = require_symbols6();
+    var createFastMessageEvent;
     var MessageEvent = class _MessageEvent extends Event {
       #eventInit;
       constructor(type, eventInitDict = {}) {
@@ -54630,30 +58933,30 @@ var require_events2 = __commonJS({
         webidl.util.markAsUncloneable(this);
       }
       get data() {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         return this.#eventInit.data;
       }
       get origin() {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         return this.#eventInit.origin;
       }
       get lastEventId() {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         return this.#eventInit.lastEventId;
       }
       get source() {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         return this.#eventInit.source;
       }
       get ports() {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         if (!Object.isFrozen(this.#eventInit.ports)) {
           Object.freeze(this.#eventInit.ports);
         }
         return this.#eventInit.ports;
       }
       initMessageEvent(type, bubbles = false, cancelable = false, data = null, origin2 = "", lastEventId = "", source = null, ports = []) {
-        webidl.brandCheck(this, _MessageEvent);
+        webidl.brandCheck(this, webidl.is.MessageEvent);
         webidl.argumentLengthCheck(arguments, 1, "MessageEvent.initMessageEvent");
         return new _MessageEvent(type, {
           bubbles,
@@ -54665,20 +58968,23 @@ var require_events2 = __commonJS({
           ports
         });
       }
-      static createFastMessageEvent(type, init) {
-        const messageEvent = new _MessageEvent(kConstruct, type, init);
-        messageEvent.#eventInit = init;
-        messageEvent.#eventInit.data ??= null;
-        messageEvent.#eventInit.origin ??= "";
-        messageEvent.#eventInit.lastEventId ??= "";
-        messageEvent.#eventInit.source ??= null;
-        messageEvent.#eventInit.ports ??= [];
-        return messageEvent;
+      static {
+        createFastMessageEvent = (type, init) => {
+          const messageEvent = new _MessageEvent(kConstruct, type, init);
+          messageEvent.#eventInit = init;
+          messageEvent.#eventInit.data ??= null;
+          messageEvent.#eventInit.origin ??= "";
+          messageEvent.#eventInit.lastEventId ??= "";
+          messageEvent.#eventInit.source ??= null;
+          messageEvent.#eventInit.ports ??= [];
+          return messageEvent;
+        };
+        webidl.is.MessageEvent = (arg) => {
+          return arg != null && typeof arg === "object" && #eventInit in arg;
+        };
       }
     };
-    var { createFastMessageEvent } = MessageEvent;
-    delete MessageEvent.createFastMessageEvent;
-    var CloseEvent = class _CloseEvent extends Event {
+    var CloseEvent = class extends Event {
       #eventInit;
       constructor(type, eventInitDict = {}) {
         const prefix = "CloseEvent constructor";
@@ -54690,19 +58996,24 @@ var require_events2 = __commonJS({
         webidl.util.markAsUncloneable(this);
       }
       get wasClean() {
-        webidl.brandCheck(this, _CloseEvent);
+        webidl.brandCheck(this, webidl.is.CloseEvent);
         return this.#eventInit.wasClean;
       }
       get code() {
-        webidl.brandCheck(this, _CloseEvent);
+        webidl.brandCheck(this, webidl.is.CloseEvent);
         return this.#eventInit.code;
       }
       get reason() {
-        webidl.brandCheck(this, _CloseEvent);
+        webidl.brandCheck(this, webidl.is.CloseEvent);
         return this.#eventInit.reason;
       }
+      static {
+        webidl.is.CloseEvent = (arg) => {
+          return arg != null && typeof arg === "object" && #eventInit in arg;
+        };
+      }
     };
-    var ErrorEvent = class _ErrorEvent extends Event {
+    var ErrorEvent = class extends Event {
       #eventInit;
       constructor(type, eventInitDict) {
         const prefix = "ErrorEvent constructor";
@@ -54714,24 +59025,29 @@ var require_events2 = __commonJS({
         this.#eventInit = eventInitDict;
       }
       get message() {
-        webidl.brandCheck(this, _ErrorEvent);
+        webidl.brandCheck(this, webidl.is.ErrorEvent);
         return this.#eventInit.message;
       }
       get filename() {
-        webidl.brandCheck(this, _ErrorEvent);
+        webidl.brandCheck(this, webidl.is.ErrorEvent);
         return this.#eventInit.filename;
       }
       get lineno() {
-        webidl.brandCheck(this, _ErrorEvent);
+        webidl.brandCheck(this, webidl.is.ErrorEvent);
         return this.#eventInit.lineno;
       }
       get colno() {
-        webidl.brandCheck(this, _ErrorEvent);
+        webidl.brandCheck(this, webidl.is.ErrorEvent);
         return this.#eventInit.colno;
       }
       get error() {
-        webidl.brandCheck(this, _ErrorEvent);
+        webidl.brandCheck(this, webidl.is.ErrorEvent);
         return this.#eventInit.error;
+      }
+      static {
+        webidl.is.ErrorEvent = (arg) => {
+          return arg != null && typeof arg === "object" && #eventInit in arg;
+        };
       }
     };
     Object.defineProperties(MessageEvent.prototype, {
@@ -55255,11 +59571,11 @@ var require_connection2 = __commonJS({
         processResponse(response) {
           if (response.type === "error" || response.status !== 101) {
             if (response.socket?.session == null) {
-              failWebsocketConnection(handler, 1002, "Received network error or non-101 status code.", response.error);
+              failHandshake(handler, response, 1002, "Received network error or non-101 status code.", response.error);
               return;
             }
             if (response.status !== 200) {
-              failWebsocketConnection(handler, 1002, "Received network error or non-200 status code.", response.error);
+              failHandshake(handler, response, 1002, "Received network error or non-200 status code.", response.error);
               return;
             }
           }
@@ -55268,39 +59584,44 @@ var require_connection2 = __commonJS({
             warningEmitted = true;
           }
           if (protocols.length !== 0 && !response.headersList.get("Sec-WebSocket-Protocol")) {
-            failWebsocketConnection(handler, 1002, "Server did not respond with sent protocols.");
+            failHandshake(handler, response, 1002, "Server did not respond with sent protocols.");
             return;
           }
           if (response.socket.session == null && response.headersList.get("Upgrade")?.toLowerCase() !== "websocket") {
-            failWebsocketConnection(handler, 1002, 'Server did not set Upgrade header to "websocket".');
+            failHandshake(handler, response, 1002, 'Server did not set Upgrade header to "websocket".');
             return;
           }
           if (response.socket.session == null && response.headersList.get("Connection")?.toLowerCase() !== "upgrade") {
-            failWebsocketConnection(handler, 1002, 'Server did not set Connection header to "upgrade".');
+            failHandshake(handler, response, 1002, 'Server did not set Connection header to "upgrade".');
             return;
           }
-          const secWSAccept = response.headersList.get("Sec-WebSocket-Accept");
-          const digest = crypto3.hash("sha1", keyValue + uid, "base64");
-          if (secWSAccept !== digest) {
-            failWebsocketConnection(handler, 1002, "Incorrect hash received in Sec-WebSocket-Accept header.");
-            return;
+          if (response.socket.session == null) {
+            const secWSAccept = response.headersList.get("Sec-WebSocket-Accept");
+            const digest = crypto3.hash("sha1", keyValue + uid, "base64");
+            if (secWSAccept !== digest) {
+              failHandshake(handler, response, 1002, "Incorrect hash received in Sec-WebSocket-Accept header.");
+              return;
+            }
           }
           const secExtension = response.headersList.get("Sec-WebSocket-Extensions");
           let extensions;
           if (secExtension !== null) {
             extensions = parseExtensions(secExtension);
             if (!extensions.has("permessage-deflate")) {
-              failWebsocketConnection(handler, 1002, "Sec-WebSocket-Extensions header does not match.");
+              failHandshake(handler, response, 1002, "Sec-WebSocket-Extensions header does not match.");
               return;
             }
           }
           const secProtocol = response.headersList.get("Sec-WebSocket-Protocol");
           if (secProtocol !== null) {
             const requestProtocols = getDecodeSplit("sec-websocket-protocol", request.headersList);
-            if (!requestProtocols.includes(secProtocol)) {
-              failWebsocketConnection(handler, 1002, "Protocol was not set in the opening handshake.");
+            if (requestProtocols === null || !requestProtocols.includes(secProtocol)) {
+              failHandshake(handler, response, 1002, "Protocol was not set in the opening handshake.");
               return;
             }
+          }
+          if (response.socket.session != null) {
+            response.socket.allowHalfOpen = false;
           }
           response.socket.on("data", handler.onSocketData);
           response.socket.on("close", handler.onSocketClose);
@@ -55343,6 +59664,12 @@ var require_connection2 = __commonJS({
       } else {
         object.readyState = states.CLOSING;
       }
+    }
+    function failHandshake(handler, response, code, reason, cause) {
+      if (response.socket?.session != null && !response.socket.destroyed) {
+        response.socket.destroy();
+      }
+      failWebsocketConnection(handler, code, reason, cause);
     }
     function failWebsocketConnection(handler, code, reason, cause) {
       if (isEstablished(handler.readyState)) {
@@ -55415,6 +59742,7 @@ var require_permessage_deflate2 = __commonJS({
             if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
               callback(new MessageSizeExceededError());
               this.#inflate.removeAllListeners();
+              this.#inflate.destroy();
               this.#inflate = null;
               return;
             }
@@ -55464,6 +59792,7 @@ var require_receiver2 = __commonJS({
     var { WebsocketFrameSend } = require_frame2();
     var { PerMessageDeflate } = require_permessage_deflate2();
     var { MessageSizeExceededError } = require_errors2();
+    var { defaultWebSocketMaxFragments, defaultWebSocketMaxPayloadSize } = require_constants6();
     var ByteParser = class extends Writable2 {
       #buffers = [];
       #fragmentsBytes = 0;
@@ -55483,16 +59812,19 @@ var require_receiver2 = __commonJS({
       /**
        * @param {import('./websocket').Handler} handler
        * @param {Map<string, string>|null} extensions
-       * @param {{ maxPayloadSize?: number }} [options]
+       * @param {{ maxFragments?: number, maxPayloadSize?: number }} [options]
+       *   A missing value uses the default limit; `0` disables the limit.
        */
       constructor(handler, extensions, options = {}) {
         super();
         this.#handler = handler;
         this.#extensions = extensions == null ? /* @__PURE__ */ new Map() : extensions;
-        this.#maxFragments = options.maxFragments ?? 0;
-        this.#maxPayloadSize = options.maxPayloadSize ?? 0;
+        this.#maxFragments = options.maxFragments ?? defaultWebSocketMaxFragments;
+        this.#maxPayloadSize = options.maxPayloadSize ?? defaultWebSocketMaxPayloadSize;
         if (this.#extensions.has("permessage-deflate")) {
-          this.#extensions.set("permessage-deflate", new PerMessageDeflate(extensions, options));
+          this.#extensions.set("permessage-deflate", new PerMessageDeflate(extensions, {
+            maxPayloadSize: this.#maxPayloadSize
+          }));
         }
       }
       /**
@@ -55621,6 +59953,15 @@ var require_receiver2 = __commonJS({
             if (isControlFrame(this.#info.opcode)) {
               this.#loop = this.parseControlFrame(body);
               this.#state = parserStates.INFO;
+              if (this.#loop && this.#handler.socket.writableNeedDrain) {
+                this.#loop = false;
+                this.#handler.socket.once("drain", () => {
+                  if (this.destroyed) return;
+                  this.#loop = true;
+                  this.run(callback);
+                });
+                return;
+              }
             } else {
               if (!this.#info.compressed) {
                 if (!this.writeFragments(body)) {
@@ -55717,6 +60058,7 @@ var require_receiver2 = __commonJS({
       }
       consumeFragments() {
         const fragments = this.#fragments;
+        this.#info.compressed = false;
         if (fragments.length === 1) {
           this.#fragmentsBytes = 0;
           return fragments.shift();
@@ -55920,6 +60262,7 @@ var require_websocket2 = __commonJS({
     var { channels } = require_diagnostics2();
     var kRef = /* @__PURE__ */ Symbol.for("nodejs.ref");
     var kUnref = /* @__PURE__ */ Symbol.for("nodejs.unref");
+    var ping;
     function getSocketAddress(socket) {
       if (typeof socket?.address === "function") {
         return socket.address();
@@ -56022,13 +60365,13 @@ var require_websocket2 = __commonJS({
         this.#handler.readyState = _WebSocket.CONNECTING;
         this.#binaryType = "blob";
       }
+      // TODO: remove this
       [kRef]() {
-        webidl.brandCheck(this, _WebSocket);
         this.#refed = true;
         this.#handler.socket?.ref?.();
       }
+      // TODO: remove this
       [kUnref]() {
-        webidl.brandCheck(this, _WebSocket);
         this.#refed = false;
         this.#handler.socket?.unref?.();
       }
@@ -56038,7 +60381,7 @@ var require_websocket2 = __commonJS({
        * @param {string|undefined} reason
        */
       close(code = void 0, reason = void 0) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         const prefix = "WebSocket.close";
         if (code !== void 0) {
           code = webidl.converters["unsigned short"](code, prefix, "code", webidl.attributes.Clamp);
@@ -56055,7 +60398,7 @@ var require_websocket2 = __commonJS({
        * @param {NodeJS.TypedArray|ArrayBuffer|Blob|string} data
        */
       send(data) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         const prefix = "WebSocket.send";
         webidl.argumentLengthCheck(arguments, 1, prefix);
         data = webidl.converters.WebSocketSendData(data, prefix, "data");
@@ -56089,31 +60432,31 @@ var require_websocket2 = __commonJS({
         }
       }
       get readyState() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#handler.readyState;
       }
       get bufferedAmount() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#bufferedAmount;
       }
       get url() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return URLSerializer(this.#url);
       }
       get extensions() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#extensions;
       }
       get protocol() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#protocol;
       }
       get onopen() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#events.open;
       }
       set onopen(fn) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         if (this.#events.open) {
           this.removeEventListener("open", this.#events.open);
         }
@@ -56126,11 +60469,11 @@ var require_websocket2 = __commonJS({
         }
       }
       get onerror() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#events.error;
       }
       set onerror(fn) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         if (this.#events.error) {
           this.removeEventListener("error", this.#events.error);
         }
@@ -56143,11 +60486,11 @@ var require_websocket2 = __commonJS({
         }
       }
       get onclose() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#events.close;
       }
       set onclose(fn) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         if (this.#events.close) {
           this.removeEventListener("close", this.#events.close);
         }
@@ -56160,11 +60503,11 @@ var require_websocket2 = __commonJS({
         }
       }
       get onmessage() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#events.message;
       }
       set onmessage(fn) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         if (this.#events.message) {
           this.removeEventListener("message", this.#events.message);
         }
@@ -56177,11 +60520,11 @@ var require_websocket2 = __commonJS({
         }
       }
       get binaryType() {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         return this.#binaryType;
       }
       set binaryType(type) {
-        webidl.brandCheck(this, _WebSocket);
+        webidl.brandCheck(this, webidl.is.WebSocket);
         if (type !== "blob" && type !== "arraybuffer") {
           this.#binaryType = "blob";
         } else {
@@ -56291,27 +60634,26 @@ var require_websocket2 = __commonJS({
           });
         }
       }
-      /**
-       * @param {WebSocket} ws
-       * @param {Buffer|undefined} buffer
-       */
-      static ping(ws2, buffer) {
-        if (Buffer.isBuffer(buffer)) {
-          if (buffer.length > 125) {
-            throw new TypeError("A PING frame cannot have a body larger than 125 bytes.");
+      static {
+        ping = (ws2, buffer) => {
+          if (Buffer.isBuffer(buffer)) {
+            if (buffer.length > 125) {
+              throw new TypeError("A PING frame cannot have a body larger than 125 bytes.");
+            }
+          } else if (buffer !== void 0) {
+            throw new TypeError("Expected buffer payload");
           }
-        } else if (buffer !== void 0) {
-          throw new TypeError("Expected buffer payload");
-        }
-        const readyState = ws2.#handler.readyState;
-        if (isEstablished(readyState) && !isClosing(readyState) && !isClosed(readyState)) {
-          const frame = new WebsocketFrameSend(buffer);
-          ws2.#handler.socket.write(frame.createFrame(opcodes.PING));
-        }
+          const readyState = ws2.#handler.readyState;
+          if (isEstablished(readyState) && !isClosing(readyState) && !isClosed(readyState)) {
+            const frame = new WebsocketFrameSend(buffer);
+            ws2.#handler.socket.write(frame.createFrame(opcodes.PING));
+          }
+        };
+        webidl.is.WebSocket = (arg) => {
+          return arg != null && typeof arg === "object" && #handler in arg;
+        };
       }
     };
-    var { ping } = WebSocket;
-    Reflect.deleteProperty(WebSocket, "ping");
     WebSocket.CONNECTING = WebSocket.prototype.CONNECTING = states.CONNECTING;
     WebSocket.OPEN = WebSocket.prototype.OPEN = states.OPEN;
     WebSocket.CLOSING = WebSocket.prototype.CLOSING = states.CLOSING;
@@ -56420,6 +60762,7 @@ var require_websocketerror = __commonJS({
         }
       });
     }
+    var createUnvalidatedWebSocketError;
     var WebSocketError = class _WebSocketError extends createInheritableDOMException() {
       #closeCode;
       #reason;
@@ -56446,20 +60789,18 @@ var require_websocketerror = __commonJS({
       get reason() {
         return this.#reason;
       }
-      /**
-       * @param {string} message
-       * @param {number|null} code
-       * @param {string} reason
-       */
-      static createUnvalidatedWebSocketError(message, code, reason) {
-        const error2 = new _WebSocketError(message, kConstruct);
-        error2.#closeCode = code;
-        error2.#reason = reason;
-        return error2;
+      static {
+        createUnvalidatedWebSocketError = (message, code, reason) => {
+          const error2 = new _WebSocketError(message, kConstruct);
+          error2.#closeCode = code;
+          error2.#reason = reason;
+          return error2;
+        };
+        webidl.is.WebSocketError = (arg) => {
+          return arg != null && typeof arg === "object" && #reason in arg;
+        };
       }
     };
-    var { createUnvalidatedWebSocketError } = WebSocketError;
-    delete WebSocketError.createUnvalidatedWebSocketError;
     Object.defineProperties(WebSocketError.prototype, {
       closeCode: kEnumerableProperty,
       reason: kEnumerableProperty,
@@ -56470,7 +60811,6 @@ var require_websocketerror = __commonJS({
         configurable: true
       }
     });
-    webidl.is.WebSocketError = webidl.util.MakeTypeAssertion(WebSocketError);
     module2.exports = { WebSocketError, createUnvalidatedWebSocketError };
   }
 });
@@ -56507,9 +60847,9 @@ var require_websocketstream = __commonJS({
       #readableStream;
       /** @type {ReadableStreamDefaultController} */
       #readableStreamController;
-      // Each WebSocketStream object has an associated writable stream , which is a WritableStream .
-      /** @type {WritableStream} */
-      #writableStream;
+      // Retain the controller so the writable stream can be errored while locked.
+      /** @type {WritableStreamDefaultController} */
+      #writableStreamController;
       // Each WebSocketStream object has an associated boolean handshake aborted , which is initially false.
       #handshakeAborted = false;
       /** @type {import('../websocket').Handler} */
@@ -56531,7 +60871,9 @@ var require_websocketstream = __commonJS({
           }
           this.#handler.socket.destroy();
         },
-        onSocketClose: () => this.#onSocketClose(),
+        // When the WebSocket connection is closed for a WebSocketStream stream, possibly cleanly, the user agent must
+        // queue a global task on the WebSocket task source given stream ’s relevant global object to run the following substeps:
+        onSocketClose: () => queueMicrotask(() => this.#onSocketClose()),
         onPing: () => {
         },
         onPong: () => {
@@ -56639,6 +60981,8 @@ var require_websocketstream = __commonJS({
           this.#handler.socket.write(frame.createFrame(opcode), () => {
             promise.resolve(void 0);
           });
+        } else {
+          promise.resolve(void 0);
         }
         return promise.promise;
       }
@@ -56655,21 +60999,24 @@ var require_websocketstream = __commonJS({
         parser.on("error", (err) => this.#handler.onParserError(err));
         this.#parser = parser;
         this.#handler.readyState = states.OPEN;
-        const extensions = parsedExtensions ?? "";
+        const extensions = response.headersList.get("sec-websocket-extensions") ?? "";
         const protocol = response.headersList.get("sec-websocket-protocol") ?? "";
         const readable = new ReadableStream({
           start: (controller) => {
             this.#readableStreamController = controller;
           },
+          pull: () => this.#pull(),
           cancel: (reason) => this.#cancel(reason)
         });
         const writable = new WritableStream({
+          start: (controller) => {
+            this.#writableStreamController = controller;
+          },
           write: (chunk) => this.#write(chunk),
           close: () => closeWebSocketConnection(this.#handler, null, null),
           abort: (reason) => this.#closeUsingReason(reason)
         });
         this.#readableStream = readable;
-        this.#writableStream = writable;
         this.#openedPromise.resolve({
           extensions,
           protocol,
@@ -56694,6 +61041,9 @@ var require_websocketstream = __commonJS({
           chunk = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         }
         this.#readableStreamController.enqueue(chunk);
+        if (this.#readableStreamController.desiredSize <= 0) {
+          this.#handler.socket.pause();
+        }
       }
       /** @type {import('../websocket').Handler['onSocketClose']} */
       #onSocketClose() {
@@ -56707,15 +61057,13 @@ var require_websocketstream = __commonJS({
         }
         const result = this.#parser?.closingInfo;
         let code = result?.code ?? 1005;
-        if (!this.#handler.closeState.has(sentCloseFrameState.SENT) && !this.#handler.closeState.has(sentCloseFrameState.RECEIVED)) {
+        if (!this.#handler.closeState.has(sentCloseFrameState.RECEIVED)) {
           code = 1006;
         }
         const reason = result?.reason == null ? "" : utf8DecodeBytes(Buffer.from(result.reason));
         if (wasClean) {
           readableStreamClose(this.#readableStreamController);
-          if (!this.#writableStream.locked) {
-            this.#writableStream.abort(new DOMException("A closed WebSocketStream cannot be written to", "InvalidStateError"));
-          }
+          this.#writableStreamController.error(new DOMException("A closed WebSocketStream cannot be written to", "InvalidStateError"));
           this.#closedPromise.resolve({
             closeCode: code,
             reason
@@ -56723,7 +61071,7 @@ var require_websocketstream = __commonJS({
         } else {
           const error2 = createUnvalidatedWebSocketError("unclean close", code, reason);
           this.#readableStreamController?.error(error2);
-          this.#writableStream?.abort(error2);
+          this.#writableStreamController?.error(error2);
           this.#closedPromise.reject(error2);
         }
       }
@@ -56735,6 +61083,10 @@ var require_websocketstream = __commonJS({
           reasonString = reason.reason;
         }
         closeWebSocketConnection(this.#handler, code, reasonString);
+      }
+      // To pull bytes from a WebSocketStream stream , if stream is currently applying backpressure, release backpressure.
+      #pull() {
+        this.#handler.socket.resume();
       }
       //  To cancel a WebSocketStream stream given reason , close using reason giving stream and reason .
       #cancel(reason) {
@@ -56830,6 +61182,7 @@ var require_util14 = __commonJS({
 var require_eventsource_stream2 = __commonJS({
   "node_modules/undici/lib/web/eventsource/eventsource-stream.js"(exports2, module2) {
     "use strict";
+    var buffer = require("node:buffer");
     var { Transform } = require("node:stream");
     var { isASCIINumber, isValidLastEventId } = require_util14();
     var BOM = [239, 187, 191];
@@ -56837,24 +61190,28 @@ var require_eventsource_stream2 = __commonJS({
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var defaultMaxEventSize = buffer.kStringMaxLength;
     var DATA = Buffer.from("data");
     var EVENT = Buffer.from("event");
     var ID = Buffer.from("id");
     var RETRY = Buffer.from("retry");
-    function isASCIINumberBytes(buffer, start) {
-      if (start >= buffer.length) {
+    var minParserItems = 1024;
+    var maxParserItems = 131072;
+    var bytesPerParserItem = 128;
+    function isASCIINumberBytes(buffer2, start) {
+      if (start >= buffer2.length) {
         return false;
       }
-      for (let i = start; i < buffer.length; i++) {
-        if (buffer[i] < 48 || buffer[i] > 57) {
+      for (let i = start; i < buffer2.length; i++) {
+        if (buffer2[i] < 48 || buffer2[i] > 57) {
           return false;
         }
       }
       return true;
     }
-    function isValidLastEventIdBytes(buffer, start) {
-      for (let i = start; i < buffer.length; i++) {
-        if (buffer[i] === 0) {
+    function isValidLastEventIdBytes(buffer2, start) {
+      for (let i = start; i < buffer2.length; i++) {
+        if (buffer2[i] === 0) {
           return false;
         }
       }
@@ -56870,6 +61227,11 @@ var require_eventsource_stream2 = __commonJS({
         }
       }
       return true;
+    }
+    function createMaxEventSizeExceededError() {
+      const error2 = new Error("EventSource message size exceeded");
+      error2.aborted = false;
+      return error2;
     }
     var EventSourceStream = class extends Transform {
       /**
@@ -56897,6 +61259,13 @@ var require_eventsource_stream2 = __commonJS({
       pos = 0;
       lineChunkIndex = 0;
       linePos = 0;
+      lineLength = 0;
+      eventSize = 0;
+      eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 };
+      dataLineCount = 0;
+      maxEventSize;
+      maxDataLines;
+      maxBufferedChunks;
       event = {
         data: void 0,
         event: void 0,
@@ -56906,6 +61275,7 @@ var require_eventsource_stream2 = __commonJS({
       /**
        * @param {object} options
        * @param {boolean} [options.readableObjectMode]
+       * @param {number} [options.maxEventSize]
        * @param {eventSourceSettings} [options.eventSourceSettings]
        * @param {(chunk: any, encoding?: BufferEncoding | undefined) => boolean} [options.push]
        */
@@ -56913,6 +61283,10 @@ var require_eventsource_stream2 = __commonJS({
         options.readableObjectMode = true;
         super(options);
         this.state = options.eventSourceSettings || {};
+        this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+        const parserItemLimit = this.maxEventSize > 0 ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem))) : 0;
+        this.maxDataLines = parserItemLimit;
+        this.maxBufferedChunks = parserItemLimit;
         if (options.push) {
           this.push = options.push;
         }
@@ -56926,6 +61300,10 @@ var require_eventsource_stream2 = __commonJS({
       _transform(chunk, _encoding, callback) {
         if (chunk.length === 0) {
           callback();
+          return;
+        }
+        if (this.maxEventSize > 0 && this.chunks.length >= this.maxBufferedChunks && chunk[0] !== LF && chunk[0] !== CR) {
+          callback(createMaxEventSizeExceededError());
           return;
         }
         this.chunks.push(chunk);
@@ -56964,14 +61342,28 @@ var require_eventsource_stream2 = __commonJS({
             if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.readLine(), this.event);
+            try {
+              this.parseLine(this.readLine(), this.event);
+            } catch (error2) {
+              callback(error2);
+              return;
+            }
             this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
           }
+          if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+            callback(createMaxEventSizeExceededError());
+            return;
+          }
           this.advanceCursor();
         }
         callback();
+      }
+      _destroy(error2, callback) {
+        this.chunks.length = 0;
+        this.clearEvent();
+        super._destroy(error2, callback);
       }
       /**
        * @param {Buffer} line
@@ -56995,6 +61387,12 @@ var require_eventsource_stream2 = __commonJS({
           }
         }
         if (isFieldName(line, fieldLength, DATA)) {
+          if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+            throw createMaxEventSizeExceededError();
+          }
+          const valueBytes = line.length - valueStart;
+          const dataSize = this.eventFieldSizes.data + (event.data === void 0 ? 0 : 1) + valueBytes;
+          this.setEventFieldSize("data", dataSize);
           const value = line.toString("utf8", valueStart);
           if (event.data === void 0) {
             event.data = value;
@@ -57002,26 +61400,37 @@ var require_eventsource_stream2 = __commonJS({
             event.data += `
 ${value}`;
           }
+          this.dataLineCount++;
           return;
         }
         if (isFieldName(line, fieldLength, RETRY)) {
           if (isASCIINumberBytes(line, valueStart)) {
+            this.setEventFieldSize("retry", line.length - valueStart);
             event.retry = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, ID)) {
           if (isValidLastEventIdBytes(line, valueStart)) {
+            this.setEventFieldSize("id", line.length - valueStart);
             event.id = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, EVENT)) {
-          const value = line.toString("utf8", valueStart);
-          if (value.length > 0) {
-            event.event = value;
+          if (valueStart < line.length) {
+            this.setEventFieldSize("event", line.length - valueStart);
+            event.event = line.toString("utf8", valueStart);
           }
         }
+      }
+      setEventFieldSize(field, size) {
+        const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+        if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+          throw createMaxEventSizeExceededError();
+        }
+        this.eventSize = eventSize;
+        this.eventFieldSizes[field] = size;
       }
       /**
        * @param {EventSourceStreamEvent} event
@@ -57049,6 +61458,12 @@ ${value}`;
         this.event.event = void 0;
         this.event.id = void 0;
         this.event.retry = void 0;
+        this.eventSize = 0;
+        this.dataLineCount = 0;
+        this.eventFieldSizes.data = 0;
+        this.eventFieldSizes.event = 0;
+        this.eventFieldSizes.id = 0;
+        this.eventFieldSizes.retry = 0;
       }
       hasPendingEvent() {
         return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
@@ -57073,13 +61488,15 @@ ${value}`;
       syncLineStartToCursor() {
         this.lineChunkIndex = this.chunkIndex;
         this.linePos = this.pos;
+        this.lineLength = 0;
         this.dropConsumedChunks();
       }
       dropConsumedChunks() {
-        while (this.lineChunkIndex > 0) {
-          this.chunks.shift();
-          this.lineChunkIndex--;
-          this.chunkIndex--;
+        if (this.lineChunkIndex > 0) {
+          const consumed = this.lineChunkIndex;
+          this.chunks.splice(0, consumed);
+          this.lineChunkIndex = 0;
+          this.chunkIndex -= consumed;
         }
         if (this.chunkIndex === this.chunks.length) {
           this.chunks.length = 0;
@@ -57178,17 +61595,22 @@ var require_eventsource2 = __commonJS({
     var { parseMIMEType } = require_data_url2();
     var { createFastMessageEvent } = require_events2();
     var { isNetworkError } = require_response2();
-    var { kEnumerableProperty } = require_util9();
+    var { cloneRequest } = require_request4();
+    var { isValidHeaderValue, kEnumerableProperty } = require_util9();
     var { environmentSettingsObject } = require_util10();
     var { createPotentialCORSRequest } = require_util14();
+    var { getGlobalDispatcher } = require_global4();
+    var { isomorphicDecode } = require_infra();
+    var textEncoder2 = new TextEncoder();
     var experimentalWarned = false;
     var defaultReconnectionTime = 3e3;
+    var maxReconnectionTime = 2 ** 31 - 1;
     var CONNECTING = 0;
     var OPEN = 1;
     var CLOSED = 2;
     var ANONYMOUS = "anonymous";
     var USE_CREDENTIALS = "use-credentials";
-    var EventSource = class _EventSource extends EventTarget {
+    var EventSource = class extends EventTarget {
       #events = {
         open: null,
         error: null,
@@ -57260,6 +61682,7 @@ var require_eventsource2 = __commonJS({
        * @readonly
        */
       get readyState() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#readyState;
       }
       /**
@@ -57268,6 +61691,7 @@ var require_eventsource2 = __commonJS({
        * @returns {string}
        */
       get url() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#url;
       }
       /**
@@ -57275,13 +61699,16 @@ var require_eventsource2 = __commonJS({
        * instantiated with CORS credentials set (true), or not (false, the default).
        */
       get withCredentials() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#withCredentials;
       }
       #connect() {
         if (this.#readyState === CLOSED) return;
         this.#readyState = CONNECTING;
+        const request = cloneRequest(this.#request);
+        request.urlList = [...this.#request.urlList];
         const fetchParams = {
-          request: this.#request,
+          request,
           dispatcher: this.#dispatcher
         };
         const processEventSourceEndOfBody = (response) => {
@@ -57314,6 +61741,7 @@ var require_eventsource2 = __commonJS({
           this.#state.origin = response.urlList[response.urlList.length - 1].origin;
           const eventSourceStream = new EventSourceStream({
             eventSourceSettings: this.#state,
+            maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
             push: (event) => {
               this.dispatchEvent(createFastMessageEvent(
                 event.type,
@@ -57344,27 +61772,33 @@ var require_eventsource2 = __commonJS({
         this.dispatchEvent(new Event("error"));
         setTimeout(() => {
           if (this.#readyState !== CONNECTING) return;
+          this.#request.headersList.delete("last-event-id", true);
           if (this.#state.lastEventId.length) {
-            this.#request.headersList.set("last-event-id", this.#state.lastEventId, true);
+            const lastEventId = isomorphicDecode(textEncoder2.encode(this.#state.lastEventId));
+            if (isValidHeaderValue(lastEventId)) {
+              this.#request.headersList.set("last-event-id", lastEventId, true);
+            }
           }
           this.#connect();
-        }, this.#state.reconnectionTime)?.unref();
+        }, Math.min(this.#state.reconnectionTime, maxReconnectionTime))?.unref();
       }
       /**
        * Closes the connection, if any, and sets the readyState attribute to
        * CLOSED.
        */
       close() {
-        webidl.brandCheck(this, _EventSource);
+        webidl.brandCheck(this, webidl.is.EventSource);
         if (this.#readyState === CLOSED) return;
         this.#readyState = CLOSED;
         this.#controller.abort();
         this.#request = null;
       }
       get onopen() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#events.open;
       }
       set onopen(fn) {
+        webidl.brandCheck(this, webidl.is.EventSource);
         if (this.#events.open) {
           this.removeEventListener("open", this.#events.open);
         }
@@ -57377,9 +61811,11 @@ var require_eventsource2 = __commonJS({
         }
       }
       get onmessage() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#events.message;
       }
       set onmessage(fn) {
+        webidl.brandCheck(this, webidl.is.EventSource);
         if (this.#events.message) {
           this.removeEventListener("message", this.#events.message);
         }
@@ -57392,9 +61828,11 @@ var require_eventsource2 = __commonJS({
         }
       }
       get onerror() {
+        webidl.brandCheck(this, webidl.is.EventSource);
         return this.#events.error;
       }
       set onerror(fn) {
+        webidl.brandCheck(this, webidl.is.EventSource);
         if (this.#events.error) {
           this.removeEventListener("error", this.#events.error);
         }
@@ -57405,6 +61843,11 @@ var require_eventsource2 = __commonJS({
         } else {
           this.#events.error = null;
         }
+      }
+      static {
+        webidl.is.EventSource = (arg) => {
+          return arg != null && typeof arg === "object" && #events in arg;
+        };
       }
     };
     var constantsPropertyDescriptors = {
@@ -57450,7 +61893,8 @@ var require_eventsource2 = __commonJS({
       {
         key: "dispatcher",
         // undici only
-        converter: webidl.converters.any
+        converter: webidl.converters.any,
+        defaultValue: () => getGlobalDispatcher()
       },
       {
         key: "node",
@@ -60149,22 +64593,82 @@ var { toString } = Object.prototype;
 var { getPrototypeOf } = Object;
 var { iterator, toStringTag } = Symbol;
 var hasOwnProperty = (({ hasOwnProperty: hasOwnProperty2 }) => (obj, prop) => hasOwnProperty2.call(obj, prop))(Object.prototype);
+var isUnsafeObjectKey = (prop) => typeof prop === "string" && (prop === "__proto__" || prop === "constructor" || prop === "prototype");
+var isPrototypeBoundary = (obj, prototype2, source) => obj === Object.prototype || !source && prototype2 === null;
+var isSafeAndFullyMutable = (obj) => {
+  if (!Object.isExtensible(obj)) {
+    return false;
+  }
+  const props = Object.getOwnPropertyNames(obj);
+  if (Object.getOwnPropertySymbols) {
+    props.push(...Object.getOwnPropertySymbols(obj));
+  }
+  return props.every((prop) => {
+    if (isUnsafeObjectKey(prop)) {
+      return false;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(obj, prop);
+    return !!descriptor && descriptor.configurable && descriptor.writable === true;
+  });
+};
 var hasOwnInPrototypeChain = (thing, prop) => {
   let obj = thing;
   const seen = [];
-  while (obj != null && obj !== Object.prototype) {
+  while (obj != null) {
     if (seen.indexOf(obj) !== -1) {
       return false;
     }
     seen.push(obj);
+    const prototype2 = getPrototypeOf(obj);
+    if (isPrototypeBoundary(obj, prototype2, obj === thing)) {
+      return false;
+    }
     if (hasOwnProperty(obj, prop)) {
       return true;
     }
-    obj = getPrototypeOf(obj);
+    obj = prototype2;
   }
   return false;
 };
 var getSafeProp = (obj, prop) => obj != null && hasOwnInPrototypeChain(obj, prop) ? obj[prop] : void 0;
+var toSafeFlatObject = (thing) => {
+  if (thing == null || typeof thing !== "object" && typeof thing !== "function") {
+    return thing;
+  }
+  const sourcePrototype = getPrototypeOf(thing);
+  if (sourcePrototype === null && isSafeAndFullyMutable(thing)) {
+    return thing;
+  }
+  const result = /* @__PURE__ */ Object.create(null);
+  const merged = /* @__PURE__ */ Object.create(null);
+  const seen = [];
+  let current = thing;
+  while (current != null) {
+    if (seen.indexOf(current) !== -1) {
+      break;
+    }
+    seen.push(current);
+    const prototype2 = current === thing ? sourcePrototype : getPrototypeOf(current);
+    if (isPrototypeBoundary(current, prototype2, current === thing)) {
+      break;
+    }
+    const props = Object.getOwnPropertyNames(current);
+    if (Object.getOwnPropertySymbols) {
+      props.push(...Object.getOwnPropertySymbols(current));
+    }
+    for (const prop of props) {
+      if (isUnsafeObjectKey(prop)) {
+        continue;
+      }
+      if (!hasOwnProperty(merged, prop)) {
+        result[prop] = thing[prop];
+        merged[prop] = true;
+      }
+    }
+    current = prototype2;
+  }
+  return result;
+};
 var kindOf = /* @__PURE__ */ ((cache) => (thing) => {
   const str = toString.call(thing);
   return cache[str] || (cache[str] = str.slice(8, -1).toLowerCase());
@@ -60199,9 +64703,9 @@ var isPlainObject = (val) => {
     return false;
   }
   const prototype2 = getPrototypeOf(val);
-  return (prototype2 === null || prototype2 === Object.prototype || getPrototypeOf(prototype2) === null) && // Treat any genuine (non-Object.prototype-polluted) Symbol.toStringTag or
-  // Symbol.iterator as evidence the value is a tagged/iterable type rather
-  // than a plain object, while ignoring keys injected onto Object.prototype.
+  return (prototype2 === null || prototype2 === Object.prototype || getPrototypeOf(prototype2) === null) && // Treat safe own/inherited Symbol.toStringTag or Symbol.iterator members as
+  // evidence the value is tagged/iterable, while ignoring members reachable
+  // only through shared or terminal prototype boundaries.
   !hasOwnInPrototypeChain(val, toStringTag) && !hasOwnInPrototypeChain(val, iterator);
 };
 var isEmptyObject = (val) => {
@@ -60612,6 +65116,7 @@ var utils_default = {
   // an alias to avoid ESLint no-prototype-builtins detection
   hasOwnInPrototypeChain,
   getSafeProp,
+  toSafeFlatObject,
   reduceDescriptors,
   freezeMethods,
   toObjectSet,
@@ -61250,24 +65755,16 @@ function toFormData(obj, formData, options) {
     throw new TypeError("target must be an object");
   }
   formData = formData || new (FormData_default || FormData)();
-  options = utils_default.toFlatObject(
-    options,
-    {
-      metaTokens: true,
-      dots: false,
-      indexes: false
-    },
-    false,
-    function defined(option, source) {
-      return !utils_default.isUndefined(source[option]);
-    }
-  );
-  const metaTokens = options.metaTokens;
-  const visitor = options.visitor || defaultVisitor;
-  const dots = options.dots;
-  const indexes = options.indexes;
-  const _Blob = options.Blob || typeof Blob !== "undefined" && Blob;
-  const maxDepth = options.maxDepth === void 0 ? DEFAULT_FORM_DATA_MAX_DEPTH : options.maxDepth;
+  const option = (name, fallback) => {
+    const value = utils_default.getSafeProp(options, name);
+    return utils_default.isUndefined(value) ? fallback : value;
+  };
+  const metaTokens = option("metaTokens", true);
+  const visitor = option("visitor") || defaultVisitor;
+  const dots = option("dots", false);
+  const indexes = option("indexes", false);
+  const _Blob = option("Blob") || typeof Blob !== "undefined" && Blob;
+  const maxDepth = option("maxDepth", DEFAULT_FORM_DATA_MAX_DEPTH);
   const useBlob = _Blob && utils_default.isSpecCompliantForm(formData);
   const stack = [];
   if (!utils_default.isFunction(visitor)) {
@@ -61291,7 +65788,10 @@ function toFormData(obj, formData, options) {
       if (Buffer_default && Buffer_default.isBufferAvailable()) {
         return Buffer_default.from(value);
       }
-      throw new AxiosError_default("Blob is not supported. Use a Buffer instead.", AxiosError_default.ERR_NOT_SUPPORT);
+      throw new AxiosError_default(
+        "Blob is not supported. Use a Buffer instead.",
+        AxiosError_default.ERR_NOT_SUPPORT
+      );
     }
     return value;
   }
@@ -61437,9 +65937,47 @@ function buildURL(url2, params, options) {
 }
 
 // node_modules/axios/lib/core/InterceptorManager.js
+var $internals2 = /* @__PURE__ */ Symbol("internals");
+function countHandlers(handlers) {
+  return handlers ? handlers.length : 0;
+}
+function trimHandlers(handlers) {
+  if (!handlers) {
+    return;
+  }
+  while (handlers.length && handlers[handlers.length - 1] === null) {
+    handlers.pop();
+  }
+}
+function syncHandlerEntries(manager, internals) {
+  const handlers = manager.handlers;
+  const length = countHandlers(handlers);
+  if (handlers !== internals.handlersRef) {
+    internals.handlersRef = handlers;
+    internals.handlerEntries.clear();
+  } else if (length !== internals.handlersLength) {
+    if (!length) {
+      internals.handlerEntries.clear();
+    } else {
+      internals.handlerEntries.forEach(function removeStaleEntry(entry, id) {
+        if (handlers[entry.index] !== entry.handler) {
+          internals.handlerEntries.delete(id);
+        }
+      });
+    }
+  }
+  internals.handlersLength = length;
+}
 var InterceptorManager = class {
   constructor() {
     this.handlers = [];
+    this[$internals2] = {
+      handlersRef: this.handlers,
+      handlersLength: this.handlers.length,
+      handlerEntries: /* @__PURE__ */ new Map(),
+      iterationDepth: 0,
+      nextId: 0
+    };
   }
   /**
    * Add a new interceptor to the stack
@@ -61451,13 +65989,25 @@ var InterceptorManager = class {
    * @return {Number} An ID used to remove interceptor later
    */
   use(fulfilled, rejected, options) {
-    this.handlers.push({
+    const handler = {
       fulfilled,
       rejected,
       synchronous: options ? options.synchronous : false,
       runWhen: options ? options.runWhen : null
+    };
+    const internals = this[$internals2];
+    if (this.handlers == null) {
+      this.handlers = [];
+    }
+    syncHandlerEntries(this, internals);
+    const id = internals.nextId++;
+    this.handlers.push(handler);
+    internals.handlerEntries.set(id, {
+      handler,
+      index: this.handlers.length - 1
     });
-    return this.handlers.length - 1;
+    internals.handlersLength = this.handlers.length;
+    return id;
   }
   /**
    * Remove an interceptor from the stack
@@ -61467,8 +66017,19 @@ var InterceptorManager = class {
    * @returns {void}
    */
   eject(id) {
-    if (this.handlers[id]) {
-      this.handlers[id] = null;
+    const internals = this[$internals2];
+    syncHandlerEntries(this, internals);
+    const entry = internals.handlerEntries.get(id);
+    if (entry) {
+      internals.handlerEntries.delete(id);
+      if (this.handlers[entry.index] !== entry.handler) {
+        return;
+      }
+      this.handlers[entry.index] = null;
+      if (!internals.iterationDepth) {
+        trimHandlers(this.handlers);
+        internals.handlersLength = this.handlers.length;
+      }
     }
   }
   /**
@@ -61479,6 +66040,7 @@ var InterceptorManager = class {
   clear() {
     if (this.handlers) {
       this.handlers = [];
+      syncHandlerEntries(this, this[$internals2]);
     }
   }
   /**
@@ -61492,11 +66054,22 @@ var InterceptorManager = class {
    * @returns {void}
    */
   forEach(fn) {
-    utils_default.forEach(this.handlers, function forEachHandler(h) {
-      if (h !== null) {
-        fn(h);
+    const internals = this[$internals2];
+    syncHandlerEntries(this, internals);
+    internals.iterationDepth++;
+    try {
+      utils_default.forEach(this.handlers, function forEachHandler(h) {
+        if (h !== null) {
+          fn(h);
+        }
+      });
+    } finally {
+      if (!--internals.iterationDepth) {
+        syncHandlerEntries(this, internals);
+        trimHandlers(this.handlers);
+        internals.handlersLength = countHandlers(this.handlers);
       }
-    });
+    }
   }
 };
 var InterceptorManager_default = InterceptorManager;
@@ -61654,6 +66227,22 @@ function formDataToJSON(formData) {
 }
 var formDataToJSON_default = formDataToJSON;
 
+// node_modules/axios/lib/core/methodList.js
+var methodList = Object.freeze([
+  "get",
+  "delete",
+  "head",
+  "options",
+  "post",
+  "put",
+  "patch",
+  "purge",
+  "link",
+  "unlink",
+  "query"
+]);
+var methodList_default = methodList;
+
 // node_modules/axios/lib/defaults/index.js
 var own = (obj, key) => obj != null && utils_default.hasOwnProp(obj, key) ? obj[key] : void 0;
 function stringifySafely2(rawValue, parser, encoder) {
@@ -61766,7 +66355,7 @@ var defaults = {
     }
   }
 };
-utils_default.forEach(["delete", "get", "head", "post", "put", "patch", "query"], (method) => {
+utils_default.forEach(methodList_default, (method) => {
   defaults.headers[method] = {};
 });
 var defaults_default = defaults;
@@ -61844,19 +66433,21 @@ function combineURLs(baseURL, relativeURL) {
   return baseURL.slice(0, end) + "/" + relativeURL.replace(/^\/+/, "");
 }
 
+// node_modules/axios/lib/helpers/normalizeURLForProtocolCheck.js
+var urlParserControlCharacters = /[\t\n\r]/g;
+function normalizeURLForProtocolCheck(url2) {
+  if (typeof url2 !== "string") {
+    return url2;
+  }
+  let start = 0;
+  while (start < url2.length && url2.charCodeAt(start) <= 32) {
+    start++;
+  }
+  return url2.slice(start).replace(urlParserControlCharacters, "");
+}
+
 // node_modules/axios/lib/core/buildFullPath.js
 var malformedHttpProtocol = /^https?:(?!\/\/)/i;
-var httpProtocolControlCharacters = /[\t\n\r]/g;
-function stripLeadingC0ControlOrSpace(url2) {
-  let i = 0;
-  while (i < url2.length && url2.charCodeAt(i) <= 32) {
-    i++;
-  }
-  return url2.slice(i);
-}
-function normalizeURLForProtocolCheck(url2) {
-  return stripLeadingC0ControlOrSpace(url2).replace(httpProtocolControlCharacters, "");
-}
 function redactFragment(fragment) {
   if (!fragment) {
     return fragment;
@@ -61978,7 +66569,7 @@ var import_follow_redirects = __toESM(require_follow_redirects(), 1);
 var import_zlib = __toESM(require("zlib"), 1);
 
 // node_modules/axios/lib/env/data.js
-var VERSION = "1.19.0";
+var VERSION = "1.20.0";
 
 // node_modules/axios/lib/helpers/parseProtocol.js
 function parseProtocol(url2) {
@@ -61987,7 +66578,7 @@ function parseProtocol(url2) {
 }
 
 // node_modules/axios/lib/helpers/fromDataURI.js
-var DATA_URL_PATTERN = /^([^,;]+\/[^,;]+)?((?:;[^,;=]+=[^,;]+)*)(;base64)?,([\s\S]*)$/;
+var DATA_URL_PATTERN = /^([^,;/]+\/[^,;/]+)?((?:;[^,;=]+=[^,;]+)*)(;base64)?,([\s\S]*)$/;
 function fromDataURI(uri, asBlob, options) {
   const _Blob = options && options.Blob || platform_default.classes.Blob;
   const protocol = parseProtocol(uri);
@@ -62300,6 +66891,7 @@ var Http2Sessions = class {
   }
   getSession(authority, options) {
     options = Object.assign(
+      /* @__PURE__ */ Object.create(null),
       {
         sessionTimeout: 1e3
       },
@@ -62365,6 +66957,7 @@ var Http2Sessions = class {
       };
     }
     session.once("close", removeSession);
+    session.once("error", removeSession);
     let entry = [session, options];
     authoritySessions ? authoritySessions.push(entry) : authoritySessions = this.sessions[authority] = [entry];
     return session;
@@ -62389,6 +66982,13 @@ var callbackify_default = callbackify;
 
 // node_modules/axios/lib/helpers/shouldBypassProxy.js
 var LOOPBACK_HOSTNAMES = /* @__PURE__ */ new Set(["localhost", "0.0.0.0"]);
+var trimTrailingDots = (value) => {
+  let end = value.length;
+  while (end && value.charCodeAt(end - 1) === 46) {
+    end--;
+  }
+  return end === value.length ? value : value.slice(0, end);
+};
 var isIPv4Loopback = (host) => {
   const parts = host.split(".");
   if (parts.length !== 4) return false;
@@ -62421,7 +67021,7 @@ var normalizeIPAddress = (host) => {
   if (h.charAt(0) === "[" && h.charAt(h.length - 1) === "]") {
     h = h.slice(1, -1);
   }
-  h = h.replace(/\.+$/, "");
+  h = trimTrailingDots(h);
   if (!/^[0-9.xXa-fA-F]+$/.test(h)) return host;
   const parts = h.split(".");
   if (parts.some((p) => p === "")) return host;
@@ -62533,6 +67133,40 @@ var unmapIPv4MappedIPv6 = (host) => {
   }
   return host;
 };
+var IPV4_OCTET_RE = /^(?:0|[1-9]\d{0,2})$/;
+var ipv4ToBytes = (host) => {
+  const parts = host.split(".");
+  return parts.length === 4 && parts.every((part) => IPV4_OCTET_RE.test(part) && Number(part) <= 255) ? parts.map(Number) : null;
+};
+var IPV6_GROUP_RE = /^[0-9a-f]{1,4}$/i;
+var ipv6ToBytes = (host) => {
+  const halves = host.split("::");
+  if (halves.length > 2) {
+    return null;
+  }
+  const groups = halves[0] ? halves[0].split(":") : [];
+  if (halves.length === 2) {
+    const rear = halves[1] ? halves[1].split(":") : [];
+    const missing = 8 - groups.length - rear.length;
+    if (missing < 1) {
+      return null;
+    }
+    groups.push(...new Array(missing).fill("0"), ...rear);
+  }
+  if (groups.length !== 8 || groups.some((group) => !IPV6_GROUP_RE.test(group))) {
+    return null;
+  }
+  return groups.flatMap((group) => {
+    const value = Number.parseInt(group, 16);
+    return [value >> 8 & 255, value & 255];
+  });
+};
+var ipToBytes = (host) => {
+  if (typeof host !== "string" || !host) {
+    return null;
+  }
+  return host.indexOf(":") !== -1 ? ipv6ToBytes(host) : ipv4ToBytes(host);
+};
 var normalizeNoProxyHost = (hostname) => {
   if (!hostname) {
     return hostname;
@@ -62540,12 +67174,89 @@ var normalizeNoProxyHost = (hostname) => {
   if (hostname.charAt(0) === "[" && hostname.charAt(hostname.length - 1) === "]") {
     hostname = hostname.slice(1, -1);
   }
-  const trimmed = hostname.replace(/\.+$/, "");
+  const trimmed = trimTrailingDots(hostname);
   const ipv4 = normalizeIPAddress(trimmed);
   if (ipv4 !== trimmed) {
     return ipv4;
   }
   return unmapIPv4MappedIPv6(trimmed);
+};
+var normalizeCidrBase = (input) => {
+  let base = input;
+  const startsBracket = base.charAt(0) === "[";
+  const endsBracket = base.charAt(base.length - 1) === "]";
+  const hasBracket = base.includes("[") || base.includes("]");
+  if (startsBracket || endsBracket) {
+    if (!startsBracket || !endsBracket) {
+      return null;
+    }
+    base = base.slice(1, -1);
+    if (base.indexOf(":") === -1 || base.includes("[") || base.includes("]")) {
+      return null;
+    }
+  } else if (hasBracket) {
+    return null;
+  }
+  if (!base || base.charAt(base.length - 1) === ".") {
+    return null;
+  }
+  const wasIPv6 = base.indexOf(":") !== -1;
+  if (wasIPv6) {
+    try {
+      base = new URL(`http://[${base}]/`).hostname.slice(1, -1);
+    } catch (_err) {
+      return null;
+    }
+  } else {
+    base = normalizeIPAddress(base);
+    if (!ipv4ToBytes(base)) {
+      return null;
+    }
+  }
+  return { normalized: unmapIPv4MappedIPv6(base), wasIPv6 };
+};
+var CIDR_ENTRY_RE = /^(.+)\/(0|[1-9]\d{0,2})$/;
+var parseCidrEntry = (entry) => {
+  if (entry.indexOf("/") === -1) {
+    return void 0;
+  }
+  const match = CIDR_ENTRY_RE.exec(entry);
+  if (!match) {
+    return null;
+  }
+  let prefix = Number(match[2]);
+  const parsedBase = normalizeCidrBase(match[1]);
+  if (!parsedBase) {
+    return null;
+  }
+  const { normalized, wasIPv6 } = parsedBase;
+  if (wasIPv6 && normalized.indexOf(":") === -1) {
+    if (prefix < 96) {
+      return null;
+    }
+    prefix -= 96;
+  }
+  const bytes = ipToBytes(normalized);
+  if (!bytes || prefix > bytes.length * 8) {
+    return null;
+  }
+  return { bytes, prefix };
+};
+var isInSubnet = (addressBytes, networkBytes, prefix) => {
+  const fullBytes = prefix >> 3;
+  for (let i = 0; i < fullBytes; i++) {
+    if (addressBytes[i] !== networkBytes[i]) {
+      return false;
+    }
+  }
+  const remainingBits = prefix & 7;
+  if (remainingBits) {
+    const mask = 255 << 8 - remainingBits & 255;
+    if ((addressBytes[fullBytes] & mask) !== (networkBytes[fullBytes] & mask)) {
+      return false;
+    }
+  }
+  return true;
 };
 function shouldBypassProxy(location) {
   let parsed;
@@ -62563,12 +67274,17 @@ function shouldBypassProxy(location) {
   }
   const port = Number.parseInt(parsed.port, 10) || DEFAULT_PORTS2[parsed.protocol.split(":", 1)[0]] || 0;
   const hostname = normalizeNoProxyHost(parsed.hostname.toLowerCase());
+  const hostnameBytes = ipToBytes(hostname);
   return noProxy.split(/[\s,]+/).some((entry) => {
     if (!entry) {
       return false;
     }
     if (entry === "*") {
       return true;
+    }
+    const cidr = parseCidrEntry(entry);
+    if (cidr !== void 0) {
+      return cidr !== null && !!hostnameBytes && hostnameBytes.length === cidr.bytes.length && isInSubnet(hostnameBytes, cidr.bytes, cidr.prefix);
     }
     let [entryHost, entryPort] = parseNoProxyEntry(entry);
     entryHost = normalizeNoProxyHost(entryHost);
@@ -62655,7 +67371,8 @@ function throttle(fn, freq) {
     }
   };
   const flush = () => lastArgs && invoke(lastArgs);
-  return [throttled, flush];
+  const flushWith = (...args) => invoke(args);
+  return [throttled, flush, flushWith];
 }
 var throttle_default = throttle;
 
@@ -62664,7 +67381,7 @@ var progressEventReducer = (listener, isDownloadStream, freq = 3) => {
   let bytesNotified = 0;
   const _speedometer = speedometer_default(50, 250);
   return throttle_default((e) => {
-    if (!e || typeof e.loaded !== "number") {
+    if (!e || !utils_default.isNumber(e.loaded)) {
       return;
     }
     const rawLoaded = e.loaded;
@@ -62825,6 +67542,12 @@ var { http: httpFollow, https: httpsFollow } = import_follow_redirects.default;
 var isHttps = /https:?/;
 var kAxiosSocketListener = /* @__PURE__ */ Symbol("axios.http.socketListener");
 var kAxiosCurrentReq = /* @__PURE__ */ Symbol("axios.http.currentReq");
+function handleSocketError(err) {
+  const current = this[kAxiosCurrentReq];
+  if (current && !current.destroyed) {
+    current.destroy(err);
+  }
+}
 var kAxiosInstalledTunnel = /* @__PURE__ */ Symbol("axios.http.installedTunnel");
 var tunnelingAgentCache = /* @__PURE__ */ new Map();
 var tunnelingAgentCacheUser = /* @__PURE__ */ new WeakMap();
@@ -62927,10 +67650,10 @@ function isSameOriginRedirect(redirectOptions, requestDetails) {
     return false;
   }
 }
-function setProxy(options, configProxy, location, isRedirect, configHttpsAgent, configHttpAgent) {
+function setProxy(options, configProxy, location, isRedirect, configHttpsAgent, configHttpAgent, allowEnvProxy = true) {
   let proxy = configProxy;
   const proxyEnvAgent = getProxyEnvAgent(options, configHttpAgent, configHttpsAgent);
-  if (!proxy && proxy !== false && !isNodeEnvProxyEnabled(proxyEnvAgent)) {
+  if (!proxy && proxy !== false && allowEnvProxy && !isNodeEnvProxyEnabled(proxyEnvAgent)) {
     const proxyUrl = getProxyForUrl(location);
     if (proxyUrl) {
       if (!shouldBypassProxy(location)) {
@@ -63027,9 +67750,13 @@ function setProxy(options, configProxy, location, isRedirect, configHttpsAgent, 
       redirectOptions.href,
       true,
       configHttpsAgent,
-      configHttpAgent
+      configHttpAgent,
+      allowEnvProxy
     );
   };
+  return Boolean(
+    proxy || configProxy !== false && allowEnvProxy && isNodeEnvProxyEnabled(proxyEnvAgent)
+  );
 }
 var isHttpAdapterSupported = typeof process !== "undefined" && utils_default.kindOf(process) === "process";
 var wrapAsync = (asyncExecutor) => {
@@ -63054,7 +67781,7 @@ var wrapAsync = (asyncExecutor) => {
 };
 var resolveFamily = ({ address, family }) => {
   if (!utils_default.isString(address)) {
-    throw TypeError("address must be a string");
+    throw new AxiosError_default("address must be a string", AxiosError_default.ERR_BAD_OPTION_VALUE);
   }
   return {
     address,
@@ -63062,6 +67789,30 @@ var resolveFamily = ({ address, family }) => {
   };
 };
 var buildAddressEntry = (address, family) => resolveFamily(utils_default.isObject(address) ? address : { address, family });
+var normalizedLookupCache = /* @__PURE__ */ new WeakMap();
+var normalizeLookup = (lookup) => {
+  let normalized = normalizedLookupCache.get(lookup);
+  if (normalized) {
+    return normalized;
+  }
+  const callbackLookup = callbackify_default(lookup, (value) => utils_default.isArray(value) ? value : [value]);
+  normalized = (hostname, opt, cb) => {
+    callbackLookup(hostname, opt, (err, arg0, arg1) => {
+      if (err) {
+        return cb(err);
+      }
+      let addresses;
+      try {
+        addresses = utils_default.isArray(arg0) ? arg0.map((addr) => buildAddressEntry(addr)) : [buildAddressEntry(arg0, arg1)];
+      } catch (error2) {
+        return cb(error2);
+      }
+      opt.all ? cb(err, addresses) : cb(err, addresses[0].address, addresses[0].family);
+    });
+  };
+  normalizedLookupCache.set(lookup, normalized);
+  return normalized;
+};
 var http2Transport = {
   request(options, cb) {
     const authority = options.protocol + "//" + options.hostname + ":" + (options.port || (options.protocol === "https:" ? 443 : 80));
@@ -63098,6 +67849,7 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
     let family = own3("family");
     let httpVersion = own3("httpVersion");
     if (httpVersion === void 0) httpVersion = 1;
+    const rawHttpVersion = httpVersion;
     let http2Options = own3("http2Options");
     const httpAgent = own3("httpAgent");
     const httpsAgent = own3("httpsAgent");
@@ -63114,25 +67866,32 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
     let rejected = false;
     let req;
     let connectPhaseTimer;
-    httpVersion = +httpVersion;
+    try {
+      httpVersion = +httpVersion;
+    } catch (err) {
+      throw new AxiosError_default(
+        "Invalid protocol version: value is not a number",
+        AxiosError_default.ERR_BAD_OPTION_VALUE,
+        config
+      );
+    }
     if (Number.isNaN(httpVersion)) {
-      throw TypeError(`Invalid protocol version: '${config.httpVersion}' is not a number`);
+      throw new AxiosError_default(
+        `Invalid protocol version: '${rawHttpVersion}' is not a number`,
+        AxiosError_default.ERR_BAD_OPTION_VALUE,
+        config
+      );
     }
     if (httpVersion !== 1 && httpVersion !== 2) {
-      throw TypeError(`Unsupported protocol version '${httpVersion}'`);
+      throw new AxiosError_default(
+        `Unsupported protocol version '${httpVersion}'`,
+        AxiosError_default.ERR_BAD_OPTION_VALUE,
+        config
+      );
     }
     const isHttp2 = httpVersion === 2;
     if (lookup) {
-      const _lookup = callbackify_default(lookup, (value) => utils_default.isArray(value) ? value : [value]);
-      lookup = (hostname, opt, cb) => {
-        _lookup(hostname, opt, (err, arg0, arg1) => {
-          if (err) {
-            return cb(err);
-          }
-          const addresses = utils_default.isArray(arg0) ? arg0.map((addr) => buildAddressEntry(addr)) : [buildAddressEntry(arg0, arg1)];
-          opt.all ? cb(err, addresses) : cb(err, addresses[0].address, addresses[0].family);
-        });
-      };
+      lookup = normalizeLookup(lookup);
     }
     const abortEmitter = new import_events.EventEmitter();
     function abort(reason) {
@@ -63375,6 +68134,9 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
       utils_default.hasOwnProp(transitional2, "advertiseZstdAcceptEncoding") && transitional2.advertiseZstdAcceptEncoding === true ? ACCEPT_ENCODING_WITH_ZSTD : ACCEPT_ENCODING,
       false
     );
+    if (isHttp2 && lookup) {
+      http2Options = Object.assign(/* @__PURE__ */ Object.create(null), http2Options, { lookup });
+    }
     const options = Object.assign(/* @__PURE__ */ Object.create(null), {
       path: path5,
       method,
@@ -63385,9 +68147,11 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
       family,
       beforeRedirect: dispatchBeforeRedirect,
       beforeRedirects: /* @__PURE__ */ Object.create(null),
-      http2Options
+      http2Options,
+      createConnection: void 0
     });
     !utils_default.isUndefined(lookup) && (options.lookup = lookup);
+    let proxyApplied = false;
     if (socketPath) {
       if (typeof socketPath !== "string") {
         return reject(
@@ -63415,13 +68179,17 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
     } else {
       options.hostname = parsed.hostname.startsWith("[") ? parsed.hostname.slice(1, -1) : parsed.hostname;
       options.port = parsed.port;
-      setProxy(
+      proxyApplied = setProxy(
         options,
         configProxy,
         protocol + "//" + parsed.hostname + (parsed.port ? ":" + parsed.port : "") + options.path,
         false,
         httpsAgent,
-        httpAgent
+        httpAgent,
+        // The HTTP/2 transport connects independently of HTTP/1 agents, so it
+        // cannot apply either axios-resolved or agent-local environment proxies.
+        // Explicit proxy config is still processed and rejected below.
+        !isHttp2
       );
     }
     let transport;
@@ -63432,6 +68200,15 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
       options.agent = isHttpsRequest ? httpsAgent : httpAgent;
     }
     if (isHttp2) {
+      if (proxyApplied) {
+        return reject(
+          new AxiosError_default(
+            "HTTP/2 requests with a proxy are not supported",
+            AxiosError_default.ERR_NOT_SUPPORT,
+            config
+          )
+        );
+      }
       transport = http2Transport;
     } else {
       const configTransport = own3("transport");
@@ -63519,7 +68296,11 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
             transformStream,
             progressEventDecorator(
               responseLength,
-              progressEventReducer(asyncDecorator(onDownloadProgress, scheduleProgress), true, 3)
+              progressEventReducer(
+                asyncDecorator(onDownloadProgress, scheduleProgress),
+                true,
+                3
+              )
             )
           )
         );
@@ -63668,12 +68449,7 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
         socket.setKeepAlive(true, 1e3 * 60);
       }
       if (!socket[kAxiosSocketListener]) {
-        socket.on("error", function handleSocketError(err) {
-          const current = socket[kAxiosCurrentReq];
-          if (current && !current.destroyed) {
-            current.destroy(err);
-          }
-        });
+        socket.on("error", handleSocketError);
         socket[kAxiosSocketListener] = true;
       }
       socket[kAxiosCurrentReq] = req;
@@ -63918,7 +68694,7 @@ function mergeConfig(config1, config2) {
     transformResponse: defaultToConfig2,
     paramsSerializer: defaultToConfig2,
     timeout: defaultToConfig2,
-    timeoutMessage: defaultToConfig2,
+    timeoutErrorMessage: defaultToConfig2,
     withCredentials: defaultToConfig2,
     withXSRFToken: defaultToConfig2,
     adapter: defaultToConfig2,
@@ -63995,10 +68771,11 @@ function resolveConfig(config) {
     }
   }
   if (utils_default.isFormData(data)) {
+    const getHeaders = utils_default.getSafeProp(data, "getHeaders");
     if (platform_default.hasStandardBrowserEnv || platform_default.hasStandardBrowserWebWorkerEnv || utils_default.isReactNative(data)) {
       headers.setContentType(void 0);
-    } else if (utils_default.isFunction(data.getHeaders)) {
-      setFormDataHeaders(headers, data.getHeaders(), own3("formDataHeaderPolicy"));
+    } else if (utils_default.isFunction(getHeaders)) {
+      setFormDataHeaders(headers, getHeaders.call(data), own3("formDataHeaderPolicy"));
     }
   }
   if (platform_default.hasStandardBrowserEnv) {
@@ -64027,7 +68804,7 @@ var xhr_default = isXHRAdapterSupported && function(config) {
     let { responseType, onUploadProgress, onDownloadProgress } = _config;
     let onCanceled;
     let uploadThrottled, downloadThrottled;
-    let flushUpload, flushDownload;
+    let flushUpload, flushDownload, flushDownloadWithEvent;
     function done() {
       flushUpload && flushUpload();
       flushDownload && flushDownload();
@@ -64037,7 +68814,27 @@ var xhr_default = isXHRAdapterSupported && function(config) {
     let request = new XMLHttpRequest();
     request.open(_config.method.toUpperCase(), _config.url, true);
     request.timeout = _config.timeout;
-    function onloadend() {
+    function onloadend(event) {
+      if (!request) {
+        return;
+      }
+      if (request.status === 0 && (parseProtocol(normalizeURLForProtocolCheck(_config.url)) || parseProtocol(platform_default.origin)) !== "file" && !(request.responseURL && request.responseURL.startsWith("file:"))) {
+        reject(new AxiosError_default("Request aborted", AxiosError_default.ECONNABORTED, config, request));
+        done();
+        request = null;
+        return;
+      }
+      try {
+        if (event) {
+          flushDownloadWithEvent && flushDownloadWithEvent(event);
+        } else {
+          flushDownload && flushDownload();
+        }
+      } catch (err) {
+        setTimeout(() => {
+          throw err;
+        });
+      }
       if (!request) {
         return;
       }
@@ -64125,7 +68922,10 @@ var xhr_default = isXHRAdapterSupported && function(config) {
       request.responseType = _config.responseType;
     }
     if (onDownloadProgress) {
-      [downloadThrottled, flushDownload] = progressEventReducer(onDownloadProgress, true);
+      [downloadThrottled, flushDownload, flushDownloadWithEvent] = progressEventReducer(
+        onDownloadProgress,
+        true
+      );
       request.addEventListener("progress", downloadThrottled);
     }
     if (onUploadProgress && request.upload) {
@@ -64295,6 +69095,17 @@ var trackStream = (stream4, chunkSize, onProgress, onFinish) => {
 
 // node_modules/axios/lib/adapters/fetch.js
 var DEFAULT_CHUNK_SIZE = 64 * 1024;
+var DEFAULT_REQUEST_OPTIONS = {
+  cache: "default",
+  redirect: "follow",
+  referrer: "about:client",
+  referrerPolicy: "",
+  mode: "cors",
+  integrity: "",
+  keepalive: false,
+  priority: "auto",
+  window: null
+};
 var { isFunction: isFunction2 } = utils_default;
 var encodeUTF82 = (str) => encodeURIComponent(str).replace(
   /%([0-9A-F]{2})/gi,
@@ -64425,7 +69236,8 @@ var factory = (env) => {
       withCredentials = "same-origin",
       fetchOptions,
       maxContentLength,
-      maxBodyLength
+      maxBodyLength,
+      maxRedirects
     } = resolveConfig_default(config);
     const hasMaxContentLength = utils_default.isNumber(maxContentLength) && maxContentLength > -1;
     const hasMaxBodyLength = utils_default.isNumber(maxBodyLength) && maxBodyLength > -1;
@@ -64555,17 +69367,44 @@ var factory = (env) => {
         }
       }
       headers.set("User-Agent", "axios/" + VERSION, false);
-      const resolvedOptions = {
-        ...fetchOptions,
+      const safeFetchOptions = fetchOptions == null ? fetchOptions : Object.assign(/* @__PURE__ */ Object.create(null), fetchOptions);
+      if (safeFetchOptions) {
+        delete safeFetchOptions.body;
+        delete safeFetchOptions.headers;
+        delete safeFetchOptions.method;
+        delete safeFetchOptions.signal;
+        delete safeFetchOptions.duplex;
+        delete safeFetchOptions.credentials;
+      }
+      const resolvedOptions = Object.assign(/* @__PURE__ */ Object.create(null), safeFetchOptions, {
         signal: composedSignal,
         method: method.toUpperCase(),
         headers: toByteStringHeaderObject(headers.normalize()),
         body: data,
         duplex: "half",
         credentials: isCredentialsSupported ? withCredentials : void 0
-      };
+      });
+      if (isRequestSupported) {
+        utils_default.forEach(DEFAULT_REQUEST_OPTIONS, (value, key) => {
+          if (resolvedOptions[key] === void 0) {
+            resolvedOptions[key] = value;
+          }
+        });
+        if (resolvedOptions.signal === void 0) {
+          resolvedOptions.signal = null;
+        }
+        if (resolvedOptions.body === void 0) {
+          resolvedOptions.body = null;
+        }
+      }
+      if (maxRedirects === 0) {
+        resolvedOptions.redirect = "manual";
+        if (safeFetchOptions) {
+          safeFetchOptions.redirect = "manual";
+        }
+      }
       request = isRequestSupported && new Request(url2, resolvedOptions);
-      let response = await (isRequestSupported ? _fetch(request, fetchOptions) : _fetch(url2, resolvedOptions));
+      let response = await (isRequestSupported ? _fetch(request, safeFetchOptions) : _fetch(url2, resolvedOptions));
       const responseHeaders = AxiosHeaders_default.from(response.headers);
       if (hasMaxContentLength) {
         const declaredLength = utils_default.toFiniteNumber(responseHeaders.getContentLength());
@@ -64784,9 +69623,10 @@ function throwIfCancellationRequested(config) {
     throw new CanceledError_default(null, config);
   }
 }
-function dispatchRequest(config) {
+function dispatchRequest(_config) {
+  const config = utils_default.toSafeFlatObject(_config);
   throwIfCancellationRequested(config);
-  config.headers = AxiosHeaders_default.from(config.headers);
+  config.headers = AxiosHeaders_default.from(utils_default.getSafeProp(config, "headers"));
   config.data = transformData.call(config, config.transformRequest);
   if (["post", "put", "patch"].indexOf(config.method) !== -1) {
     config.headers.setContentType("application/x-www-form-urlencoded", false);
@@ -64916,16 +69756,15 @@ var Axios = class {
       return await this._request(configOrUrl, config);
     } catch (err) {
       if (err instanceof Error) {
-        let dummy = {};
-        Error.captureStackTrace ? Error.captureStackTrace(dummy) : dummy = new Error();
-        const stack = (() => {
-          if (!dummy.stack) {
-            return "";
-          }
-          const firstNewlineIndex = dummy.stack.indexOf("\n");
-          return firstNewlineIndex === -1 ? "" : dummy.stack.slice(firstNewlineIndex + 1);
-        })();
         try {
+          let dummy = {};
+          Error.captureStackTrace ? Error.captureStackTrace(dummy) : dummy = new Error();
+          const dummyStack = dummy.stack;
+          let stack = "";
+          if (typeof dummyStack === "string") {
+            const firstNewlineIndex = dummyStack.indexOf("\n");
+            stack = firstNewlineIndex === -1 ? "" : dummyStack.slice(firstNewlineIndex + 1);
+          }
           if (!err.stack) {
             err.stack = stack;
           } else if (stack) {
@@ -64995,9 +69834,9 @@ var Axios = class {
       },
       true
     );
-    config.method = (config.method || this.defaults.method || "get").toLowerCase();
+    config.method = (utils_default.getSafeProp(config, "method") || utils_default.getSafeProp(this.defaults, "method") || "get").toLowerCase();
     let contextHeaders = headers && utils_default.merge(headers.common, headers[config.method]);
-    headers && utils_default.forEach(["delete", "get", "head", "post", "put", "patch", "query", "common"], (method) => {
+    headers && utils_default.forEach(methodList_default.concat("common"), (method) => {
       delete headers[method];
     });
     config.headers = AxiosHeaders_default.concat(contextHeaders, headers);
@@ -65260,14 +70099,22 @@ var HttpStatusCode = {
   Gone: 410,
   LengthRequired: 411,
   PreconditionFailed: 412,
+  /**
+   * @deprecated Use `ContentTooLarge` instead.
+   */
   PayloadTooLarge: 413,
+  ContentTooLarge: 413,
   UriTooLong: 414,
   UnsupportedMediaType: 415,
   RangeNotSatisfiable: 416,
   ExpectationFailed: 417,
   ImATeapot: 418,
   MisdirectedRequest: 421,
+  /**
+   * @deprecated Use `UnprocessableContent` instead.
+   */
   UnprocessableEntity: 422,
+  UnprocessableContent: 422,
   Locked: 423,
   FailedDependency: 424,
   TooEarly: 425,
@@ -65296,7 +70143,9 @@ var HttpStatusCode = {
   InvalidSslCertificate: 526
 };
 Object.entries(HttpStatusCode).forEach(([key, value]) => {
-  HttpStatusCode[value] = key;
+  if (HttpStatusCode[value] === void 0) {
+    HttpStatusCode[value] = key;
+  }
 });
 var HttpStatusCode_default = HttpStatusCode;
 
