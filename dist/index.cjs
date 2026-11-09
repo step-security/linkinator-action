@@ -72669,7 +72669,7 @@ var import_node_fs = require("node:fs");
 var import_node_path2 = __toESM(require("node:path"), 1);
 var import_node_process = __toESM(require("node:process"), 1);
 
-// node_modules/linkinator/node_modules/glob/dist/esm/index.min.js
+// node_modules/glob/dist/esm/index.min.js
 var import_node_url = require("node:url");
 var import_node_path = require("node:path");
 var import_node_url2 = require("node:url");
@@ -75384,7 +75384,7 @@ var zt = class {
     for (; !this.paused && (t = this.#t.shift()); ) t();
   }
   onResume(t) {
-    this.signal?.aborted || (this.paused ? this.#t.push(t) : t());
+    this.paused ? this.#t.push(t) : t();
   }
   async matchCheck(t, e) {
     if (e && this.opts.nodir) return;
@@ -75444,11 +75444,12 @@ var zt = class {
     i && this.matchFinish(i, e);
   }
   walkCB(t, e, s) {
-    this.signal?.aborted && s(), this.walkCB2(t, e, new Et(this.opts), s);
+    if (this.signal?.aborted) return s();
+    this.walkCB2(t, e, new Et(this.opts), s);
   }
   walkCB2(t, e, s, i) {
-    if (this.#o(t)) return i();
-    if (this.signal?.aborted && i(), this.paused) {
+    if (this.#o(t) || this.signal?.aborted) return i();
+    if (this.paused) {
       this.onResume(() => this.walkCB2(t, e, s, i));
       return;
     }
@@ -75475,11 +75476,12 @@ var zt = class {
     o();
   }
   walkCBSync(t, e, s) {
-    this.signal?.aborted && s(), this.walkCB2Sync(t, e, new Et(this.opts), s);
+    if (this.signal?.aborted) return s();
+    this.walkCB2Sync(t, e, new Et(this.opts), s);
   }
   walkCB2Sync(t, e, s, i) {
-    if (this.#o(t)) return i();
-    if (this.signal?.aborted && i(), this.paused) {
+    if (this.#o(t) || this.signal?.aborted) return i();
+    if (this.paused) {
       this.onResume(() => this.walkCB2Sync(t, e, s, i));
       return;
     }
